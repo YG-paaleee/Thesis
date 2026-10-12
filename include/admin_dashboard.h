@@ -1,0 +1,599 @@
+// Generated from admin.html by tools/sync_web_assets.py. Do not edit directly.
+#ifndef ADMIN_DASHBOARD_H
+#define ADMIN_DASHBOARD_H
+
+#include <pgmspace.h>
+
+const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Barangay San Miguel - Main Emergency Command Dashboard (V1)</title>
+    <style>
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+        }
+        body {
+            background-color: #0d1117;
+            color: #c9d1d9;
+            padding: 16px;
+            font-size: 13.5px;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding-bottom: 14px;
+            border-bottom: 1px solid #30363d;
+            margin-bottom: 16px;
+        }
+        .header-title h1 {
+            font-size: 20px;
+            color: #58a6ff;
+            font-weight: 700;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        .header-title .subtitle {
+            font-size: 12px;
+            color: #8b949e;
+            margin-top: 3px;
+        }
+        .header-badges {
+            display: flex;
+            gap: 8px;
+            align-items: center;
+        }
+        .badge {
+            padding: 4px 10px;
+            border-radius: 20px;
+            font-size: 11.5px;
+            font-weight: 600;
+        }
+        .badge-mesh { background: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb; }
+        .badge-crypto { background: #23863622; color: #3fb950; border: 1px solid #238636; }
+        .badge-hub { background: #d2992222; color: #e3b341; border: 1px solid #d29922; }
+
+        /* Metric Grid */
+        .metrics-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+            gap: 12px;
+            margin-bottom: 16px;
+        }
+        .metric-card {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 12px 14px;
+        }
+        .metric-label {
+            font-size: 11px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: #8b949e;
+            margin-bottom: 4px;
+            font-weight: 600;
+        }
+        .metric-val {
+            font-size: 22px;
+            font-weight: 700;
+            color: #f0f6fc;
+        }
+        .metric-val.sos { color: #f85149; }
+        .metric-val.gen { color: #d29922; }
+        .metric-val.rout { color: #58a6ff; }
+        .metric-val.pdr { color: #3fb950; }
+
+        /* Main 2-Column Grid */
+        .main-layout {
+            display: grid;
+            grid-template-columns: 280px 1fr;
+            gap: 16px;
+        }
+        @media (max-width: 900px) {
+            .main-layout { grid-template-columns: 1fr; }
+        }
+
+        /* Topology & Controls Sidebar */
+        .sidebar {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+        .panel {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 14px;
+        }
+        .panel-header {
+            font-size: 13px;
+            font-weight: 700;
+            color: #f0f6fc;
+            margin-bottom: 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .node-list {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+        }
+        .node-row {
+            background: #0d1117;
+            border: 1px solid #21262d;
+            border-radius: 6px;
+            padding: 8px 10px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        .node-name {
+            font-weight: 600;
+            color: #f0f6fc;
+            font-size: 12.5px;
+        }
+        .node-role {
+            font-size: 10.5px;
+            color: #8b949e;
+        }
+        .node-telemetry {
+            text-align: right;
+            font-size: 11px;
+            color: #7ee787;
+        }
+        .node-status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 4px;
+        }
+        .dot-green { background: #3fb950; box-shadow: 0 0 6px #3fb95088; }
+        .dot-yellow { background: #d29922; }
+        .dot-red { background: #f85149; }
+
+        /* Simulator controls */
+        .btn-group {
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+        }
+        .btn {
+            background: #21262d;
+            color: #c9d1d9;
+            border: 1px solid #30363d;
+            padding: 7px 12px;
+            border-radius: 6px;
+            font-size: 12px;
+            font-weight: 600;
+            cursor: pointer;
+            text-align: center;
+            transition: all 0.15s ease;
+        }
+        .btn:hover {
+            background: #30363d;
+            border-color: #8b949e;
+            color: #f0f6fc;
+        }
+        .btn-sos {
+            background: #da3633;
+            color: #ffffff;
+            border-color: #f85149;
+        }
+        .btn-sos:hover {
+            background: #b62324;
+        }
+        .btn-export {
+            background: #238636;
+            color: #ffffff;
+            border-color: #2ea043;
+        }
+        .btn-export:hover {
+            background: #2ea043;
+        }
+
+        /* Message Table Section */
+        .table-panel {
+            background: #161b22;
+            border: 1px solid #30363d;
+            border-radius: 8px;
+            padding: 14px;
+            overflow-x: auto;
+        }
+        .table-controls {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 12px;
+            flex-wrap: wrap;
+            gap: 8px;
+        }
+        .filter-select {
+            background: #0d1117;
+            border: 1px solid #30363d;
+            color: #c9d1d9;
+            padding: 5px 8px;
+            border-radius: 6px;
+            font-size: 12px;
+            outline: none;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 12px;
+            text-align: left;
+        }
+        th {
+            background: #0d1117;
+            color: #8b949e;
+            padding: 9px 10px;
+            font-weight: 600;
+            border-bottom: 1px solid #30363d;
+            white-space: nowrap;
+        }
+        td {
+            padding: 10px;
+            border-bottom: 1px solid #21262d;
+            vertical-align: middle;
+        }
+        tr:hover td {
+            background: #1c2128;
+        }
+        
+        .p-badge {
+            display: inline-block;
+            padding: 3px 7px;
+            border-radius: 4px;
+            font-size: 10.5px;
+            font-weight: 700;
+            white-space: nowrap;
+        }
+        .p-sos { background: #f8514922; color: #ff7b72; border: 1px solid #f85149; }
+        .p-gen { background: #d2992222; color: #e3b341; border: 1px solid #d29922; }
+        .p-rout { background: #1f6feb22; color: #58a6ff; border: 1px solid #1f6feb; }
+
+        .route-tag {
+            font-family: monospace;
+            background: #0d1117;
+            padding: 2px 6px;
+            border-radius: 4px;
+            border: 1px solid #30363d;
+            color: #79c0ff;
+            font-size: 11px;
+        }
+        .latency-tag {
+            font-weight: 600;
+            color: #3fb950;
+        }
+        .crypto-tag {
+            color: #7ee787;
+            font-size: 10.5px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .msg-text {
+            color: #f0f6fc;
+            max-width: 260px;
+            word-break: break-word;
+        }
+        .loc-text {
+            color: #8b949e;
+            font-size: 11px;
+        }
+        /* Emergency-first dashboard layout */
+        body { background: radial-gradient(ellipse at top left, #162235 0, #0b1220 55%); color: #e6edf6; padding: clamp(14px, 2.4vw, 30px); }
+        header { border-color: #273449; gap: 14px; flex-wrap: wrap; }
+        .header-title h1 { color: #f4f7fb; font-size: clamp(21px, 2.2vw, 28px); }
+        .badge { padding: 6px 11px; }
+        .metrics-grid { grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 10px; margin: 16px 0; }
+        .metric-card { background: #111b2b; border-color: #26364d; border-radius: 12px; padding: 14px 16px; }
+        .metric-card-sos { background: linear-gradient(145deg, #3b171e, #21151e); border-color: #a8313a; box-shadow: inset 3px 0 #ff5b62; }
+        .metric-card-sos .metric-val { font-size: 28px; }
+        .main-layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "incidents"; gap: 14px; }
+        .table-panel { grid-area: incidents; background: #101a29; border-color: #26364d; border-radius: 12px; }
+        .panel { background: #101a29; border-color: #26364d; border-radius: 12px; }
+        .priority-alert { display: flex; align-items: flex-start; gap: 15px; margin: 16px 0; padding: 18px 20px; border: 1px solid #2e6848; border-left: 5px solid #3fb950; border-radius: 12px; background: #10251d; }
+        .priority-alert.has-sos { border-color: #8f3039; border-left-color: #ff4d57; background: linear-gradient(110deg, #35171d, #241923); }
+        .priority-alert-icon { flex: 0 0 38px; height: 38px; display: grid; place-items: center; border-radius: 50%; background: #1d6b3c; color: #fff; font-size: 22px; font-weight: 800; }
+        .has-sos .priority-alert-icon { background: #d93643; }
+        .priority-alert-label { color: #a7b7ca; font-size: 11px; font-weight: 800; letter-spacing: .1em; text-transform: uppercase; }
+        .priority-alert h2 { margin: 3px 0 5px; color: #fff; font-size: clamp(18px, 2vw, 24px); }
+        .priority-alert p { color: #c5d0de; line-height: 1.5; }
+        .priority-alert-list { display: grid; gap: 7px; margin-top: 12px; padding-left: 18px; color: #fff; }
+        .priority-alert-list li { line-height: 1.45; overflow-wrap: anywhere; }
+        .priority-alert.is-clear .priority-alert-list { display: none; }
+        .priority-alert.is-clear #sosSummary { margin: 0; }
+        .metric-card, .panel, .table-panel { box-shadow: 0 8px 24px #0002; }
+        .panel-header { font-size: 14px; }
+        th { position: sticky; top: 0; z-index: 1; background: #172337; }
+        .priority-row-sos td { background: #31191f; }
+        .priority-row-sos td:first-child { border-left: 3px solid #ff4d57; }
+        @media (max-width: 900px) {
+            .metrics-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+            .main-layout { grid-template-columns: minmax(0, 1fr); grid-template-areas: "incidents"; }
+        }
+        @media (max-width: 480px) {
+            .metrics-grid { grid-template-columns: 1fr 1fr; }
+            .priority-alert { padding: 14px; gap: 10px; }
+            .priority-alert-icon { flex-basis: 32px; height: 32px; }
+            .header-badges { flex-wrap: wrap; }
+        }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div class="header-title">
+            <h1>&#128225; Main Hub Emergency Command (V1)</h1>
+            <div class="subtitle">Barangay San Miguel Offline LoRa Mesh Network &bull; Stationary Aggregator Terminal</div>
+        </div>
+        <div class="header-badges">
+            <span class="badge badge-mesh">915 MHz LoRa</span>
+            <span class="badge badge-crypto">AES-128-CBC + HMAC-SHA-256</span>
+            <span class="badge badge-hub">Node V1 (Stationary Hub)</span>
+        </div>
+    </header>
+
+    <section id="sosAlert" class="priority-alert is-clear" aria-live="polite" aria-atomic="true">
+        <div class="priority-alert-icon" aria-hidden="true">!</div>
+        <div>
+            <div class="priority-alert-label">Priority 1 · incoming reports</div>
+            <h2 id="sosTitle">No Priority 1 reports</h2>
+            <p id="sosSummary">Medical SOS reports received by this node will appear here.</p>
+            <ul id="sosList" class="priority-alert-list"></ul>
+        </div>
+    </section>
+
+    <!-- Top Statistical Metrics (Chapter 4 Thesis Validation) -->
+    <div class="metrics-grid">
+        <div class="metric-card">
+            <div class="metric-label">Total Messages (N)</div>
+            <div class="metric-val" id="metricTotal">0</div>
+        </div>
+        <div class="metric-card metric-card-sos">
+            <div class="metric-label">Medical SOS (k=1)</div>
+            <div class="metric-val sos" id="metricSOS">0</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">General Emerg. (k=2)</div>
+            <div class="metric-val gen" id="metricGen">0</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Routine / Info (k=3)</div>
+            <div class="metric-val rout" id="metricRout">0</div>
+        </div>
+        <div class="metric-card">
+            <div class="metric-label">Measured E2E Latency</div>
+            <div class="metric-val" id="metricLatency">0.00 s</div>
+        </div>
+    </div>
+
+    <div class="main-layout">
+        <div class="table-panel">
+            <div class="table-controls">
+                <div class="panel-header" style="margin:0;">
+                    <span>Received LoRa Messages</span>
+                </div>
+                <div>
+                    <span id="liveStatus" role="status" style="font-size:12px; color:#8b949e; margin-right:12px;">Connecting</span>
+                    <label style="font-size:12px; color:#8b949e; margin-right:6px;">Filter Priority:</label>
+                    <select id="priorityFilter" class="filter-select" onchange="renderTable()">
+                        <option value="all">All Priorities</option>
+                        <option value="1">k=1 (Medical SOS)</option>
+                        <option value="2">k=2 (General Emergency)</option>
+                        <option value="3">k=3 (Routine / Info)</option>
+                    </select>
+                </div>
+            </div>
+
+            <table>
+                <thead>
+                    <tr>
+                        <th>Ref# / ID</th>
+                        <th>Priority</th>
+                        <th>Type</th>
+                        <th>Origin</th>
+                        <th>Multi-Hop Path</th>
+                        <th>Latency (e2e)</th>
+                        <th>AES Security</th>
+                        <th>Location & Details</th>
+                        <th>Received (uptime)</th>
+                    </tr>
+                </thead>
+                <tbody id="incidentTableBody"></tbody>
+            </table>
+        </div>
+    </div>
+
+    <script>
+        let incidentLogs = [];
+        let liveFetchInProgress = false;
+
+        function updateMetrics() {
+            const emergencies = incidentLogs.filter(m => m.packetType !== 1 && m.packetType !== 3);
+            const total = emergencies.length;
+            const k1 = emergencies.filter(m => m.priority === 1).length;
+            const k2 = emergencies.filter(m => m.priority === 2).length;
+            const k3 = emergencies.filter(m => m.priority === 3).length;
+
+            document.getElementById('metricTotal').innerText = total;
+            document.getElementById('metricSOS').innerText = k1;
+            document.getElementById('metricGen').innerText = k2;
+            document.getElementById('metricRout').innerText = k3;
+
+            const measuredLatency = emergencies
+                .map(m => m.latencyMs == null ? NaN : Number(m.latencyMs))
+                .filter(value => Number.isFinite(value) && value >= 0);
+            document.getElementById('metricLatency').innerText = measuredLatency.length
+                ? `${(measuredLatency.reduce((sum, value) => sum + value, 0) / measuredLatency.length / 1000).toFixed(2)} s`
+                : 'N/A (clock not synchronized)';
+            updateEmergencyNotice();
+        }
+
+        function updateEmergencyNotice() {
+            const reports = incidentLogs
+                .filter(m => m.priority === 1)
+                .sort((a, b) => new Date(b.rxTime).getTime() - new Date(a.rxTime).getTime());
+            const alert = document.getElementById('sosAlert');
+            const list = document.getElementById('sosList');
+            list.textContent = '';
+            alert.classList.toggle('has-sos', reports.length > 0);
+            alert.classList.toggle('is-clear', reports.length === 0);
+            document.getElementById('sosTitle').textContent = reports.length
+                ? `${reports.length} Priority 1 SOS report${reports.length === 1 ? '' : 's'}`
+                : 'No Priority 1 reports';
+            document.getElementById('sosSummary').textContent = reports.length
+                ? `Latest ${Math.min(reports.length, 3)} received report${reports.length === 1 ? '' : 's'} shown below.`
+                : 'Medical SOS reports received by this node will appear here.';
+            reports.slice(0, 3).forEach(report => {
+                const item = document.createElement('li');
+                item.textContent = `#${report.id} · ${report.location} — ${report.message}`;
+                list.appendChild(item);
+            });
+        }
+
+        function renderTable() {
+            const filter = document.getElementById('priorityFilter').value;
+            const tbody = document.getElementById('incidentTableBody');
+            tbody.replaceChildren();
+            const filtered = incidentLogs.filter(m => filter === 'all' || m.priority == filter)
+                .sort((a, b) => a.priority - b.priority || Number(b.rxTime) - Number(a.rxTime));
+
+            if (filtered.length === 0) {
+                const row = document.createElement('tr');
+                const cell = document.createElement('td');
+                cell.colSpan = 9;
+                cell.style.cssText = 'text-align:center; padding:24px; color:#8b949e;';
+                cell.textContent = 'No authenticated LoRa messages have been received.';
+                row.appendChild(cell);
+                tbody.appendChild(row);
+                return;
+            }
+
+            filtered.forEach(m => {
+                const tr = document.createElement('tr');
+                if (m.priority === 1) tr.className = 'priority-row-sos';
+                const priorityCell = document.createElement('td');
+                const priorityBadge = document.createElement('span');
+                priorityBadge.className = `p-badge ${m.priority === 1 ? 'p-sos' : m.priority === 2 ? 'p-gen' : 'p-rout'}`;
+                priorityBadge.textContent = m.priority === 1 ? 'MEDICAL SOS (k=1)' : m.priority === 2 ? 'GENERAL (k=2)' : 'ROUTINE / INFO (k=3)';
+                priorityCell.appendChild(priorityBadge);
+
+                const typeNames = ['SOS', 'HEARTBEAT', 'TELEMETRY', 'ACK'];
+                const receivedSeconds = Number(m.rxTime) / 1000;
+                const latencyMs = m.latencyMs == null ? NaN : Number(m.latencyMs);
+                const cells = [
+                    `#${m.id}`,
+                    null,
+                    typeNames[m.packetType] || 'UNKNOWN',
+                    m.origin || `V${m.originNode}`,
+                    m.route || 'N/A',
+                    Number.isFinite(latencyMs) && latencyMs >= 0 ? `${(latencyMs / 1000).toFixed(2)} s` : 'N/A',
+                    m.crypto || 'Authenticated',
+                    null,
+                    Number.isFinite(receivedSeconds) ? `T+${receivedSeconds.toFixed(1)} s` : 'N/A'
+                ];
+                cells.forEach((value, index) => {
+                    if (index === 1) {
+                        tr.appendChild(priorityCell);
+                        return;
+                    }
+                    const cell = document.createElement('td');
+                    if (index === 0) cell.style.cssText = 'font-weight:700; color:#58a6ff;';
+                    if (index === 3) cell.style.cssText = 'font-weight:600; color:#f0f6fc;';
+                    if (index === 4) {
+                        const route = document.createElement('span');
+                        route.className = 'route-tag';
+                        route.textContent = value;
+                        cell.appendChild(route);
+                    } else if (index === 5) {
+                        const latency = document.createElement('span');
+                        latency.className = 'latency-tag';
+                        latency.textContent = value;
+                        cell.appendChild(latency);
+                    } else if (index === 6) {
+                        const crypto = document.createElement('span');
+                        crypto.className = 'crypto-tag';
+                        crypto.textContent = value;
+                        cell.appendChild(crypto);
+                    } else if (index === 7) {
+                        const location = document.createElement('div');
+                        location.className = 'loc-text';
+                        location.textContent = m.location || 'Unspecified';
+                        const message = document.createElement('div');
+                        message.className = 'msg-text';
+                        message.textContent = m.message || '';
+                        cell.append(location, message);
+                    } else {
+                        cell.textContent = value;
+                    }
+                    tr.appendChild(cell);
+                });
+                tbody.appendChild(tr);
+            });
+        }
+
+        function exportToCSV() {
+            if (incidentLogs.length === 0) {
+                alert("No received messages are available to export.");
+                return;
+            }
+            const csvCell = value => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
+            const rows = [["Message_ID", "Priority", "Packet_Type", "Origin_Node", "Path", "Latency_ms", "Security", "Location", "Message", "Rx_Uptime_ms"]];
+            incidentLogs.forEach(m => {
+                const packetType = ["SOS", "HEARTBEAT", "TELEMETRY", "ACK"][m.packetType] || "UNKNOWN";
+                rows.push([m.id, m.priority, packetType, m.origin, m.route,
+                    m.latencyMs, m.crypto, m.location, m.message, m.rxTime]);
+            });
+
+            const csv = rows.map(row => row.map(csvCell).join(',')).join('\n');
+            const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+            const link = document.createElement("a");
+            const url = URL.createObjectURL(blob);
+            link.setAttribute("href", url);
+            link.setAttribute("download", `Brgy_San_Miguel_Live_Incidents_${Date.now()}.csv`);
+            document.body.appendChild(link);
+            link.click();
+            document.body.removeChild(link);
+        }
+
+        async function refreshLiveIncidents() {
+            if (liveFetchInProgress) return;
+            liveFetchInProgress = true;
+            const status = document.getElementById('liveStatus');
+            try {
+                const response = await fetch('/api/live_incidents', { cache: 'no-store' });
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                const records = await response.json();
+                if (!Array.isArray(records)) throw new Error('Invalid live incident response');
+                incidentLogs = records;
+                status.textContent = `Live · ${records.length} buffered`;
+                status.style.color = '#3fb950';
+                updateMetrics();
+                renderTable();
+            } catch (error) {
+                status.textContent = 'Live feed unavailable';
+                status.style.color = '#ff7b72';
+            } finally {
+                liveFetchInProgress = false;
+            }
+        }
+
+        refreshLiveIncidents();
+        setInterval(refreshLiveIncidents, 3000);
+    </script>
+</body>
+</html>
+)ADMINDASHBOARD";
+
+#endif

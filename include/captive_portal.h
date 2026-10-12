@@ -1,0 +1,506 @@
+// Generated from index.html by tools/sync_web_assets.py. Do not edit directly.
+#ifndef CAPTIVE_PORTAL_H
+#define CAPTIVE_PORTAL_H
+
+#include <pgmspace.h>
+
+const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta http-equiv="X-UA-Compatible" content="ie=edge">
+    <title>Emergency Portal - Brgy. San Miguel</title>
+    <style>
+        *, *::before, *::after {
+            box-sizing: border-box;
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            -webkit-tap-highlight-color: transparent;
+        }
+        body {
+            background-color: #f4f5f7;
+            color: #172b4d;
+            padding: 10px;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+        .container {
+            max-width: 440px;
+            margin: 0 auto;
+            background: #ffffff;
+            padding: 16px;
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(9, 30, 66, 0.12), 0 0 1px rgba(9, 30, 66, 0.31);
+        }
+        .top-bar {
+            text-align: center;
+            color: #6b778c;
+            font-size: 11px;
+            margin-bottom: 10px;
+            line-height: 1.3;
+        }
+        .top-bar strong {
+            display: block;
+            color: #172b4d;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .network-pill {
+            display: inline-block;
+            background: #ebecf0;
+            padding: 2px 8px;
+            border-radius: 12px;
+            font-size: 10px;
+            font-weight: 600;
+            color: #42526e;
+            margin-top: 3px;
+        }
+        h1 {
+            font-size: 21px;
+            font-weight: 800;
+            color: #091e42;
+            letter-spacing: -0.2px;
+        }
+        .subtitle {
+            color: #6b778c;
+            font-size: 12px;
+            margin-top: 2px;
+            margin-bottom: 14px;
+            border-bottom: 1px solid #ebecf0;
+            padding-bottom: 8px;
+        }
+        .section-title {
+            font-size: 14px;
+            font-weight: 700;
+            margin: 14px 0 8px 0;
+            color: #091e42;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+        
+        /* Priority Group Cards */
+        .priority-group {
+            display: flex;
+            flex-direction: column;
+            gap: 7px;
+        }
+        .priority-card {
+            border: 2px solid #dfe1e6;
+            border-radius: 6px;
+            padding: 9px 12px;
+            cursor: pointer;
+            background: #ffffff;
+            transition: all 0.15s ease;
+            user-select: none;
+        }
+        .priority-card.selected-1 {
+            border-color: #de350b;
+            background-color: #ffebe6;
+        }
+        .priority-card.selected-2 {
+            border-color: #ff991f;
+            background-color: #fff0b3;
+        }
+        .priority-card.selected-3 {
+            border-color: #0052cc;
+            background-color: #deebff;
+        }
+        .priority-title {
+            font-weight: 700;
+            font-size: 13.5px;
+            display: flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .priority-card.selected-1 .priority-title { color: #bf2600; }
+        .priority-card.selected-2 .priority-title { color: #172b4d; }
+        .priority-card.selected-3 .priority-title { color: #0747a6; }
+        .priority-desc {
+            font-size: 11.5px;
+            color: #5e6c84;
+            margin-top: 2px;
+        }
+
+        /* Form Inputs */
+        .form-group {
+            margin-bottom: 11px;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            font-size: 12.5px;
+            margin-bottom: 4px;
+            color: #344563;
+        }
+        input[type="text"], input[type="password"], textarea {
+            width: 100%;
+            border: 1.5px solid #a5adba;
+            border-radius: 4px;
+            padding: 8px 10px;
+            font-size: 13.5px;
+            color: #091e42;
+            background-color: #fafbfc;
+            outline: none;
+            transition: border-color 0.15s ease, background-color 0.15s ease;
+        }
+        input[type="text"]:focus, input[type="password"]:focus, textarea:focus {
+            background-color: #ffffff;
+            border-color: #0052cc;
+        }
+        textarea {
+            height: 75px;
+            resize: none;
+        }
+        .byte-counter {
+            text-align: right;
+            font-size: 11px;
+            color: #6b778c;
+            margin-top: 3px;
+            font-weight: 600;
+        }
+        .byte-warning {
+            color: #de350b;
+            font-weight: 700;
+        }
+
+        .auth-box {
+            background: #f4f5f7;
+            border: 1px dashed #b3bac5;
+            border-radius: 6px;
+            padding: 9px 11px;
+            margin-bottom: 12px;
+        }
+        .auth-label {
+            font-size: 12px;
+            font-weight: 700;
+            color: #253858;
+            margin-bottom: 3px;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .auth-hint {
+            font-size: 10.5px;
+            color: #6b778c;
+            margin-top: 3px;
+        }
+
+        /* Feedback Status Box */
+        .status-box {
+            display: none;
+            padding: 12px;
+            border-radius: 6px;
+            font-size: 13px;
+            font-weight: 600;
+            margin: 14px 0 10px 0;
+            word-break: break-word;
+            line-height: 1.45;
+        }
+        .status-success {
+            background-color: #e3fcef;
+            color: #006644;
+            border: 1.5px solid #abf5d1;
+        }
+        .status-error {
+            background-color: #ffebe6;
+            color: #bf2600;
+            border: 1.5px solid #ffbdad;
+        }
+        .disconnect-notice {
+            margin-top: 8px;
+            padding: 8px;
+            background: rgba(255,255,255,0.7);
+            border-radius: 4px;
+            font-size: 11.5px;
+            color: #006644;
+            font-weight: 500;
+        }
+
+        /* Action Buttons */
+        .btn {
+            width: 100%;
+            padding: 11px;
+            border-radius: 4px;
+            font-size: 13.5px;
+            font-weight: 700;
+            text-align: center;
+            border: none;
+            cursor: pointer;
+            transition: opacity 0.15s ease, background-color 0.15s ease;
+        }
+        .btn-primary {
+            background-color: #de350b;
+            color: #ffffff;
+            margin-top: 4px;
+        }
+        .btn-primary:active {
+            background-color: #bf2600;
+        }
+        .btn-secondary {
+            background-color: #ffffff;
+            color: #42526e;
+            border: 1.5px solid #dfe1e6;
+            margin-top: 7px;
+        }
+        .btn-secondary:active {
+            background-color: #f4f5f7;
+        }
+        .btn-disconnect {
+            background-color: #00875a;
+            color: #ffffff;
+            margin-top: 8px;
+            display: none;
+        }
+        .btn-disconnect:active {
+            background-color: #006644;
+        }
+        .btn:disabled {
+            opacity: 0.6;
+            cursor: not-allowed;
+        }
+
+        .capacity-footer {
+            text-align: center;
+            font-size: 10.5px;
+            color: #8993a4;
+            margin-top: 14px;
+            line-height: 1.3;
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <!-- Top Caption & Network Health -->
+        <div class="top-bar">
+            Log in to emergency network
+            <strong>Brgy. San Miguel Mini Hub 3</strong>
+            <span class="network-pill">&#9679; LoRa Mesh Active &bull; AES-128-CBC + HMAC-SHA-256</span>
+        </div>
+
+        <!-- Main Header -->
+        <h1>Emergency Message</h1>
+        <div class="subtitle">No cellular data &bull; No internet required &bull; Direct LoRa Relay</div>
+
+        <form id="emergencyForm" onsubmit="submitForm(event)">
+            <!-- Community Credential Verification (Anti-Spoofing / Chapter 4.3) -->
+            <div class="auth-box">
+                <div class="auth-label">&#128274; Community Passcode / Access Token</div>
+                <input type="text" id="credential" placeholder="Enter barangay passcode (e.g. SANMIGUEL2026)" value="SANMIGUEL2026" autocomplete="off" required>
+                <div class="auth-hint">Reduces network abuse. Default: <b>SANMIGUEL2026</b></div>
+            </div>
+
+            <!-- Section 1: Priority Selection (Dual-Key Min-Heap k=1,2,3) -->
+            <div class="section-title">
+                <span>1. What is this about?</span>
+                <span style="font-size:11px; font-weight:normal; color:#6b778c;">Priority Queue</span>
+            </div>
+            <div class="priority-group" role="radiogroup" aria-label="Priority Selection">
+                <div class="priority-card selected-1" id="card-1" onclick="selectPriority(1)" role="radio" aria-checked="true" tabindex="0">
+                    <div class="priority-title">&#9888;&#65039; [!] MEDICAL SOS (k=1)</div>
+                    <div class="priority-desc">Immediate danger to life &bull; Highest priority queueing</div>
+                </div>
+                <div class="priority-card" id="card-2" onclick="selectPriority(2)" role="radio" aria-checked="false" tabindex="0">
+                    <div class="priority-title">&#9888;&#65039; [/!\] GENERAL EMERGENCY (k=2)</div>
+                    <div class="priority-desc">Needs urgent help, not immediately life-threatening</div>
+                </div>
+                <div class="priority-card" id="card-3" onclick="selectPriority(3)" role="radio" aria-checked="false" tabindex="0">
+                    <div class="priority-title">&#8505;&#65039; [i] ROUTINE / INFO (k=3)</div>
+                    <div class="priority-desc">Non-urgent situation report or status update</div>
+                </div>
+            </div>
+
+            <!-- Section 2: Inputs -->
+            <div class="section-title">2. Tell us what's happening</div>
+            <div class="form-group">
+                <label for="location">Location / Landmark in Brgy. San Miguel</label>
+                <input type="text" id="location" placeholder="Near basketball court, Purok 3, house #42" maxlength="80" autocomplete="off" required>
+            </div>
+
+            <div class="form-group">
+                <label for="message">Message (Strict 200 UTF-8 Bytes max)</label>
+                <textarea id="message" placeholder="State the emergency, number of people affected, and immediate assistance needed..." oninput="updateByteCount()" autocomplete="off" required></textarea>
+                <div class="byte-counter" id="byteCounter">0 / 200 bytes</div>
+            </div>
+
+            <!-- Section 3: Status & Connect-Queue-Disconnect -->
+            <div class="section-title">3. Delivery Status</div>
+            <div id="statusBox" class="status-box"></div>
+            
+            <button type="button" id="disconnectBtn" class="btn btn-disconnect" onclick="handleDisconnect()">&#10003; I saved my reference — show Wi-Fi steps</button>
+
+            <!-- Action Buttons -->
+            <button type="submit" id="sendBtn" class="btn btn-primary">SEND EMERGENCY MESSAGE</button>
+            <button type="button" class="btn btn-secondary" onclick="clearForm()">Clear form</button>
+        </form>
+
+        <div class="capacity-footer">
+            Wi-Fi supports up to 25 connected devices. After submitting, disconnect from EMERGENCY-HUB-03 in your device's Wi-Fi settings to free your connection slot.
+        </div>
+    </div>
+
+    <script>
+        var selectedPriority = 1;
+        var MAX_BYTES = 200;
+        var encoder = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
+
+        function selectPriority(val) {
+            selectedPriority = val;
+            for (var i = 1; i <= 3; i++) {
+                var card = document.getElementById('card-' + i);
+                if (i === val) {
+                    card.className = 'priority-card selected-' + i;
+                    card.setAttribute('aria-checked', 'true');
+                } else {
+                    card.className = 'priority-card';
+                    card.setAttribute('aria-checked', 'false');
+                }
+            }
+        }
+
+        // Exact UTF-8 byte counting
+        function getUtf8Bytes(str) {
+            if (encoder) {
+                return encoder.encode(str).length;
+            }
+            return unescape(encodeURIComponent(str)).length;
+        }
+
+        function updateByteCount() {
+            var msgInput = document.getElementById('message');
+            var text = msgInput.value;
+            var byteLen = getUtf8Bytes(text);
+
+            // Hard clamp at 200 UTF-8 bytes to prevent LoRa MTU overflow
+            if (byteLen > MAX_BYTES) {
+                while (getUtf8Bytes(text) > MAX_BYTES && text.length > 0) {
+                    text = text.slice(0, -1);
+                }
+                msgInput.value = text;
+                byteLen = getUtf8Bytes(text);
+            }
+
+            var counterEl = document.getElementById('byteCounter');
+            counterEl.innerText = byteLen + ' / ' + MAX_BYTES + ' bytes';
+            if (byteLen >= MAX_BYTES) {
+                counterEl.className = 'byte-counter byte-warning';
+            } else {
+                counterEl.className = 'byte-counter';
+            }
+        }
+
+        function showStatus(htmlContent, isSuccess) {
+            var statusBox = document.getElementById('statusBox');
+            statusBox.innerHTML = htmlContent;
+            statusBox.className = 'status-box ' + (isSuccess ? 'status-success' : 'status-error');
+            statusBox.style.display = 'block';
+
+            var discBtn = document.getElementById('disconnectBtn');
+            if (isSuccess) {
+                discBtn.style.display = 'block';
+            } else {
+                discBtn.style.display = 'none';
+            }
+        }
+
+        function clearForm() {
+            document.getElementById('emergencyForm').reset();
+            document.getElementById('credential').value = "SANMIGUEL2026";
+            selectPriority(1);
+            updateByteCount();
+            document.getElementById('statusBox').style.display = 'none';
+            document.getElementById('disconnectBtn').style.display = 'none';
+        }
+
+        function handleDisconnect() {
+            var statusBox = document.getElementById('statusBox');
+            statusBox.innerHTML = '<div><b>Your message remains queued at the hub.</b></div><div style="margin-top:4px;">To free your Wi-Fi connection slot, open your device\'s Wi-Fi settings and disconnect from <b>EMERGENCY-HUB-03</b>. This page cannot disconnect the device automatically.</div>';
+            statusBox.className = 'status-box status-success';
+            statusBox.style.display = 'block';
+            document.getElementById('disconnectBtn').style.display = 'none';
+        }
+
+        function submitForm(event) {
+            event.preventDefault();
+            var sendBtn = document.getElementById('sendBtn');
+            var cred = document.getElementById('credential').value.trim();
+            var loc = document.getElementById('location').value.trim();
+            var msg = document.getElementById('message').value.trim();
+
+            if (cred !== "SANMIGUEL2026") {
+                showStatus('&#10007; <b>Invalid Community Passcode:</b> Please use the designated barangay passcode (SANMIGUEL2026).', false);
+                return;
+            }
+            if (!loc || !msg) return;
+
+            sendBtn.disabled = true;
+            sendBtn.innerText = "ENCRYPTING & TRANSMITTING...";
+
+            var payload = {
+                credential: cred,
+                priority: selectedPriority,
+                location: loc,
+                message: msg,
+                timestamp: Math.floor(Date.now() / 1000)
+            };
+
+            fetch('/api/submit', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            })
+            .then(function(res) {
+                return res.text().then(function(body) {
+                    var data = null;
+                    if (body) {
+                        try { data = JSON.parse(body); } catch (parseError) {}
+                    }
+                    if (!res.ok) {
+                        if (res.status === 404 || res.status === 405) {
+                            throw new Error('No message submission backend is available here (HTTP ' + res.status + '). Live Server is only serving the mock page; no message was sent.');
+                        }
+                        throw new Error((data && data.message) || ('HTTP ' + res.status));
+                    }
+                    if (!data || typeof data !== 'object') {
+                        throw new Error('The server returned an invalid response. The message was not confirmed.');
+                    }
+                    return data;
+                });
+            })
+            .then(function(data) {
+                if (data.status !== 'queued' || !data.ref) {
+                    throw new Error('The hub did not confirm that your message was queued. Please try again.');
+                }
+                var ref = data.ref;
+                var priorityLabel = selectedPriority === 1 ? "MEDICAL SOS (k=1)" : (selectedPriority === 2 ? "GENERAL EMERGENCY (k=2)" : "ROUTINE/INFO (k=3)");
+                
+                var successHtml = '<div>&#10003; <b>Accepted and queued at the hub</b></div>' +
+                                  '<div style="margin-top:3px;">Ref# <b>' + ref + '</b> &bull; Priority: <b>' + priorityLabel + '</b></div>' +
+                                  '<div class="disconnect-notice">Your message is encrypted and waiting in the hub queue. This confirms queueing only; it does not confirm radio delivery. Please save your reference number.</div>';
+
+                showStatus(successHtml, true);
+                sendBtn.disabled = false;
+                sendBtn.innerText = "SEND EMERGENCY MESSAGE";
+            })
+            .catch(function(err) {
+                console.log("[Preview/submission error]", err, payload);
+                var message = (err instanceof TypeError)
+                    ? 'Could not reach a message submission service. If you opened this with Live Server, it is a static mock and does not send messages.'
+                    : ((err && err.message) ? err.message : 'The hub could not be reached.');
+                message = message.replace(/[&<>"']/g, function(ch) {
+                    return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
+                });
+                showStatus('<div>&#10007; <b>Message not confirmed</b></div><div>' + message + '</div><div style="margin-top:4px;">Do not assume the hub received it. Check your connection and try again. Preview mode does not submit messages.</div>', false);
+                sendBtn.disabled = false;
+                sendBtn.innerText = "SEND EMERGENCY MESSAGE";
+            });
+        }
+    </script>
+</body>
+</html>
+)CAPTIVEPORTAL";
+
+#endif
