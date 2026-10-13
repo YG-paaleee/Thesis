@@ -14,10 +14,13 @@ On connect it also sends "time <unix-seconds>" to each node, so the node clocks
 Usage (Windows examples):
   python tools/capture_telemetry.py COM3
   python tools/capture_telemetry.py COM3 COM5 COM7 --out run01.csv
-  python tools/capture_telemetry.py COM3 COM5 --target 300      # stop after 300 labelled link attempts
+  python tools/capture_telemetry.py COM3 COM5 --target 300      # stop after 300 CART labels
 
-  CART data collection (laptop sends a test message from the node every 30 s):
-  python tools/capture_telemetry.py COM5 --inject COM5 --every 30 --session A-V6-200m --out cart_A200.csv
+  CART training data (passive: the node labels every heartbeat it expects from its neighbours):
+  python tools/capture_telemetry.py COM8 --session F1-V1-normal --out F1-V1-normal.csv
+
+  Final evaluation (laptop sends a test message from the node every 30 s):
+  python tools/capture_telemetry.py COM5 --inject COM5 --every 30 --session E1-heap --out E1-heap.csv
 
 Outputs:
   <out>.csv        pc_epoch_ms,port,session,<node CSV columns...>   (load with pandas)
@@ -42,7 +45,8 @@ CSV_PREFIX = "CSV,"
 NODE_HEADER = ("ms,node,event,origin,id,k,type,peer,rssi,snr,peer_batt_pct,peer_traffic,"
                "peer_queue,peer_hb_age_ms,self_batt_pct,self_used_mah,mac_retries,bytes,queue_len,dtn_len,"
                "ahead,bypassed,detail")
-LABEL_EVENTS = {"ACK", "NOACK"}   # one labelled relay attempt each (CART training rows)
+LABEL_EVENTS = {"ACK", "NOACK", "HB_OK", "HB_MISS"}   # one labelled link attempt each (CART rows)
+FAIL_EVENTS = {"NOACK", "HB_MISS"}
 
 
 class Capture:
@@ -54,6 +58,7 @@ class Capture:
         self.lock = threading.Lock()
         self.rows = 0
         self.labelled = 0
+        self.failed = 0
         self.header_columns = NODE_HEADER.count(",") + 1
         self.stop = threading.Event()
         self.csv_file = open(self.out_csv, "w", encoding="utf-8", newline="")
@@ -79,11 +84,15 @@ class Capture:
             fields = body.split(",")
             if fields[2] in LABEL_EVENTS:
                 self.labelled += 1
+                if fields[2] in FAIL_EVENTS:
+                    self.failed += 1
             if self.rows % 10 == 0:
                 self.csv_file.flush()
                 self.raw_file.flush()
-            print(f"\rrows: {self.rows}   labelled link attempts (ACK/NOACK): {self.labelled}"
-                  + (f"/{self.target}" if self.target else ""), end="", flush=True)
+            share = f"{100 * self.failed / self.labelled:.0f}%" if self.labelled else "-"
+            print(f"\rrows: {self.rows}   CART labels: {self.labelled}"
+                  + (f"/{self.target}" if self.target else "")
+                  + f"   failures (HB_MISS/NOACK): {self.failed} ({share})   ", end="", flush=True)
             if self.target and self.labelled >= self.target:
                 self.stop.set()
 
@@ -163,7 +172,7 @@ def main() -> None:
     parser.add_argument("ports", nargs="+", help="serial ports, e.g. COM3 COM5 (Windows) or /dev/ttyUSB0")
     parser.add_argument("--out", default="empirical_telemetry_dataset.csv", help="output CSV file")
     parser.add_argument("--target", type=int, default=0,
-                        help="stop after this many labelled link attempts (ACK/NOACK rows); 0 = until Ctrl+C")
+                        help="stop after this many CART labels (HB_OK/HB_MISS/ACK/NOACK rows); 0 = until Ctrl+C")
     parser.add_argument("--no-time-sync", action="store_true", help="do not send the 'time' command to nodes")
     parser.add_argument("--session", default="",
                         help="label written on every row, e.g. A-V6-200m (default: output file name). "
@@ -209,7 +218,8 @@ def main() -> None:
     for thread in threads:
         thread.join(timeout=2)
     capture.close()
-    print(f"\nSaved {capture.rows} rows ({capture.labelled} labelled link attempts) to {capture.out_csv}")
+    print(f"\nSaved {capture.rows} rows ({capture.labelled} CART labels, {capture.failed} failures) "
+          f"to {capture.out_csv}")
 
 
 if __name__ == "__main__":

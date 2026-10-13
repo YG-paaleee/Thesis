@@ -211,8 +211,23 @@ struct NeighborInfo {
     uint8_t queueOccupancy;
     uint16_t lastSequence;
     uint32_t lastHeardMs;
+    uint8_t missesLogged;       // HB_MISS rows already written by timeout since lastHeardMs
+    bool labelResync;           // next heartbeat only re-synchronises (no label row)
 };
 NeighborInfo neighborTable[NETWORK_NODE_COUNT] = {};
+
+// --- CART training labels from heartbeats (receiver side) ---------------------
+// Every heartbeat a neighbour is expected to send becomes one labelled row:
+//   HB_OK   it arrived      HB_MISS   it did not (sequence gap or long silence)
+// Features are the values this node held BEFORE that heartbeat was due (last
+// heartbeat's RSSI/SNR, the neighbour's traffic/queue, and the heartbeat age at
+// the moment it should have arrived = j x interval), the same features a data
+// TX row carries. Using the age measured on arrival would leak the label.
+constexpr uint8_t HB_LABEL_MAX_GAP = 64;          // larger jump = neighbour rebooted: resync, no label
+constexpr uint8_t HB_LABEL_MAX_TIMEOUT_MISSES = 10;   // stop after ~5 min of silence
+// Wait 1.5 extra intervals: a neighbour that skips one heartbeat on a busy
+// channel does not use up a sequence number, so its next one comes ~60 s later.
+constexpr uint32_t HB_LABEL_TIMEOUT_GRACE_MS = HEARTBEAT_INTERVAL_MS + HEARTBEAT_INTERVAL_MS / 2;
 
 // Measured one-hop link quality per neighbour (averaged RSSI/SNR of every
 // authenticated frame heard) and the link-state database of all nodes' rows.
@@ -231,7 +246,9 @@ void resetMacBackoff();
 //     peer_queue,peer_hb_age_ms,self_batt_pct,self_used_mah,mac_retries,bytes,queue_len,dtn_len,
 //     ahead,bypassed,detail
 //   ms      this node's uptime (millis)       node   node that wrote the row
-//   event   NEW | TX | RX | ACK | NOACK | DELIVER | DUP | STORE | EVICT | DROP | LINK
+//   event   NEW | TX | RX | ACK | NOACK | DELIVER | DUP | STORE | EVICT | DROP | LINK |
+//           HB_OK | HB_MISS (CART training labels: expected heartbeat from peer arrived / lost;
+//           id = that heartbeat's sequence, peer_hb_age_ms = age when it was due)
 //   origin,id  message key (heartbeats: source node + heartbeat sequence)
 //   peer    the other end of the radio link: previous hop for RX, next hop for TX/ACK/NOACK
 //   rssi,snr   RX rows: measured on this frame. Other rows: last frame heard from peer
@@ -262,6 +279,8 @@ struct CsvEvent {
     uint16_t dtnLen;
     uint16_t ahead;
     uint16_t bypassed;
+    bool hasPeerAge;      // log peerAgeMs instead of "now - last heartbeat"
+    uint32_t peerAgeMs;
     const char *detail;
 };
 CsvEvent csvEvent(const char *event, uint8_t origin, uint16_t id, uint8_t k, uint8_t type, uint8_t peer);
@@ -790,7 +809,7 @@ void logCsv(const CsvEvent &e) {
         if (neighbor->batteryPermille != BATTERY_UNKNOWN) append("%.1f,", neighbor->batteryPermille / 10.0f);
         else append(",");
         append("%u,%u,%lu,", neighbor->trafficLoad, neighbor->queueOccupancy,
-               (unsigned long)(now - neighbor->lastHeardMs));
+               (unsigned long)(e.hasPeerAge ? e.peerAgeMs : now - neighbor->lastHeardMs));
     } else {
         append(",,,,");
     }
@@ -971,6 +990,54 @@ bool startLinkAck(uint8_t destinationNode, uint8_t originNode, uint16_t messageI
     return true;
 }
 
+// One CART label row for heartbeat number `sequence` from `peer`, which was the
+// j-th heartbeat expected after the last one heard. Call BEFORE neighborTable
+// is updated with a newly received heartbeat.
+void logHeartbeatLabel(uint8_t peer, uint16_t sequence, uint8_t j, bool received, const char *how) {
+    CsvEvent e = csvEvent(received ? "HB_OK" : "HB_MISS", peer, sequence, 0, PACKET_TYPE_HEARTBEAT, peer);
+    e.hasPeerAge = true;
+    e.peerAgeMs = (uint32_t)j * HEARTBEAT_INTERVAL_MS;
+    char detail[24];
+    snprintf(detail, sizeof(detail), "%s;j=%u", how, j);
+    e.detail = detail;
+    logCsv(e);
+}
+
+// A heartbeat arrived: label the ones skipped since the last (sequence gap) and this one.
+void labelArrivedHeartbeat(uint8_t peer, uint16_t sequence) {
+    NeighborInfo &n = neighborTable[peer - 1];
+    if (!n.valid || n.labelResync) return;            // no "before" features yet
+    const uint16_t gap = (uint16_t)(sequence - n.lastSequence);
+    if (gap == 0 || gap > HB_LABEL_MAX_GAP) return;   // duplicate, or neighbour rebooted
+    for (uint16_t j = (uint16_t)n.missesLogged + 1; j < gap; j++) {
+        logHeartbeatLabel(peer, (uint16_t)(n.lastSequence + j), (uint8_t)j, false, "gap");
+    }
+    if (n.missesLogged >= gap) return;   // timeout already counted this slot (rare: heartbeat very late)
+    logHeartbeatLabel(peer, sequence, (uint8_t)gap, true, "rx");
+}
+
+// A neighbour went quiet: label each expected heartbeat as missed once 1.5 extra
+// intervals have passed, so a late or skipped heartbeat is not mislabelled.
+void serviceHeartbeatLabels() {
+    static uint32_t lastCheckMs = 0;
+    const uint32_t now = millis();
+    if ((uint32_t)(now - lastCheckMs) < 1000) return;
+    lastCheckMs = now;
+    if (radioSilent) {                                 // we are deaf, not the link
+        for (uint8_t i = 0; i < NETWORK_NODE_COUNT; i++) neighborTable[i].labelResync = true;
+        return;
+    }
+    for (uint8_t peer = 1; peer <= NETWORK_NODE_COUNT; peer++) {
+        if (peer == NODE_ID) continue;
+        NeighborInfo &n = neighborTable[peer - 1];
+        if (!n.valid || n.labelResync || n.missesLogged >= HB_LABEL_MAX_TIMEOUT_MISSES) continue;
+        const uint8_t j = n.missesLogged + 1;
+        if ((uint32_t)(now - n.lastHeardMs) < (uint32_t)j * HEARTBEAT_INTERVAL_MS + HB_LABEL_TIMEOUT_GRACE_MS) continue;
+        logHeartbeatLabel(peer, (uint16_t)(n.lastSequence + j), j, false, "timeout");
+        n.missesLogged = j;
+    }
+}
+
 void handleHeartbeat(const uint8_t *packet, size_t packetLen, float rssi, float snr) {
     HeartbeatInfo heartbeat{};
     if (!parseHeartbeatBody(packet, packetLen, heartbeat) ||
@@ -993,6 +1060,9 @@ void handleHeartbeat(const uint8_t *packet, size_t packetLen, float rssi, float 
         linkStateDb.update(heartbeat.relayedOwner, heartbeat.relayedSequence, row, nowMs);
     }
 
+    // CART labels use the neighbour's state from BEFORE this heartbeat.
+    labelArrivedHeartbeat(heartbeat.sourceNode, heartbeat.sequence);
+
     NeighborInfo &neighbor = neighborTable[heartbeat.sourceNode - 1];
     neighbor.valid = true;
     neighbor.rssi = rssi;
@@ -1002,6 +1072,8 @@ void handleHeartbeat(const uint8_t *packet, size_t packetLen, float rssi, float 
     neighbor.queueOccupancy = heartbeat.queueOccupancy;
     neighbor.lastSequence = heartbeat.sequence;
     neighbor.lastHeardMs = millis();
+    neighbor.missesLogged = 0;
+    neighbor.labelResync = false;
 
     char battery[12];
     Serial.printf("[HB RX] V%u seq=%u rssi=%.1f snr=%.1f batt=%s traffic=%u queue=%u\n",
@@ -2166,6 +2238,7 @@ void loop() {
     energyService();
     applyRadioSilence();
     serviceHeartbeat();
+    serviceHeartbeatLabels();
     serviceRadioIrq();
     serviceRadioRx();
     serviceRadioMac();
