@@ -22,8 +22,18 @@ Usage (Windows examples):
   Final evaluation (laptop sends a test message from the node every 30 s):
   python tools/capture_telemetry.py COM5 --inject COM5 --every 30 --session E1-heap --out E1-heap.csv
 
+  Traffic tiers (Table 4.4), one batch per run, then keeps recording until --stop-after:
+  python tools/capture_telemetry.py COM8 COM5 --inject COM5 --tier medium --run 3 --stop-after 600 --out full_medium_03.csv
+    low     5 messages over 5 s   (2 x k=1, 2 x k=2, 1 x k=3)
+    medium 15 messages over 2 s   (5 x k=1, 6 x k=2, 4 x k=3)
+    high   30 messages at once    (15 x k=1, 9 x k=2, 6 x k=3) with the node's radio silenced
+           ("silent on") first; the radio comes back after --hold seconds (blackout test)
+  The order of k inside a batch is shuffled with --seed + --run, so run 3 of every
+  configuration gets the same sequence. Session label defaults to "<tier>-run<run>".
+
 Outputs:
-  <out>.csv        pc_epoch_ms,port,session,<node CSV columns...>   (load with pandas)
+  <out>.csv        pc_epoch_ms,port,session,<node CSV columns...>
+                   (data TX rows carry cart_pf, cart_class and heur_class: both relay-filter verdicts)   (load with pandas)
   <out>_raw.log    every line from every port, for debugging
 
 Requires: pip install pyserial
@@ -44,7 +54,7 @@ BAUD = 115200
 CSV_PREFIX = "CSV,"
 NODE_HEADER = ("ms,node,event,origin,id,k,type,peer,rssi,snr,peer_batt_pct,peer_traffic,"
                "peer_queue,peer_hb_age_ms,self_batt_pct,self_used_mah,mac_retries,bytes,queue_len,dtn_len,"
-               "ahead,bypassed,detail")
+               "ahead,bypassed,cart_pf,cart_class,heur_class,wait_ms,queue_index,d_buffer_ms,detail")
 LABEL_EVENTS = {"ACK", "NOACK", "HB_OK", "HB_MISS"}   # one labelled link attempt each (CART rows)
 FAIL_EVENTS = {"NOACK", "HB_MISS"}
 
@@ -114,6 +124,46 @@ def open_port(name: str) -> serial.Serial:
     return port
 
 
+# Table 4.4: exact integer allocations (k=1, k=2, k=3) and the time the batch is spread over.
+TIERS = {
+    "low":    {"counts": (2, 2, 1),  "spread_s": 5.0},
+    "medium": {"counts": (5, 6, 4),  "spread_s": 2.0},
+    "high":   {"counts": (15, 9, 6), "spread_s": 0.0},
+}
+SERIAL_PACING_S = 0.05   # >= 50 ms between commands so the node's serial buffer never overflows
+
+
+class TierInjector:
+    """One Table 4.4 batch: a list of (send time, command) sent once, then idle."""
+
+    def __init__(self, tier: str, run: int, seed: int, hold_s: float, start_delay_s: float):
+        import random
+        k1, k2, k3 = TIERS[tier]["counts"]
+        ks = [1] * k1 + [2] * k2 + [3] * k3
+        random.Random(seed * 1000 + run).shuffle(ks)
+        n = len(ks)
+        step = max(TIERS[tier]["spread_s"] / n, SERIAL_PACING_S)
+        t0 = time.time() + start_delay_s
+        self.schedule = []
+        if tier == "high":
+            self.schedule.append((t0, b"silent on\n"))
+            t0 += 1.0                                  # radio off before the burst
+        for i, k in enumerate(ks):
+            self.schedule.append((t0 + i * step, f"sos {k} T{tier[0].upper()}{run}|{tier} run {run} msg {i + 1}/{n}\n".encode()))
+        if tier == "high":
+            self.schedule.append((t0 + n * step + hold_s, b"silent off\n"))
+        self.tier = tier
+        self.description = (f"{tier} tier, run {run}: {n} messages (k1/k2/k3 = {k1}/{k2}/{k3}) "
+                            f"starting in {start_delay_s:g} s" + (f", radio off for ~{hold_s:g} s" if tier == "high" else ""))
+        self.last_send_at = self.schedule[-1][0]
+
+    def due(self) -> bool:
+        return bool(self.schedule) and time.time() >= self.schedule[0][0]
+
+    def command(self, port_name: str) -> bytes:
+        return self.schedule.pop(0)[1]
+
+
 class Injector:
     """Sends "sos <k> <location>|<message>" to a node on a timer (serial command in main.cpp)."""
 
@@ -142,9 +192,12 @@ def reader(name: str, capture: Capture, sync_clock: bool, injector=None) -> None
     except serial.SerialException as error:
         print(f"\n[{name}] could not open: {error}", file=sys.stderr)
         return
-    print(f"[{name}] connected" + (f", sending a test message every {injector.every_s:g} s" if injector else ""))
+    if isinstance(injector, TierInjector):
+        print(f"[{name}] connected, {injector.description}")
+    else:
+        print(f"[{name}] connected" + (f", sending a test message every {injector.every_s:g} s" if injector else ""))
     if sync_clock:
-        port.write(f"time {int(time.time())}\n".encode())
+        port.write(f"time {time.time():.3f}\n".encode())     # Unix seconds with milliseconds
     buffer = b""
     try:
         while not capture.stop.is_set():
@@ -183,6 +236,15 @@ def main() -> None:
                         help="seconds between injected messages per port (default 30; keep >= 20 at SF12)")
     parser.add_argument("--priorities", default="1,2,3",
                         help="priorities to cycle through for injected messages (default 1,2,3)")
+    parser.add_argument("--tier", choices=sorted(TIERS), default=None,
+                        help="send one Table 4.4 batch on each --inject port instead of the --every timer")
+    parser.add_argument("--run", type=int, default=1, help="run (trial) number, 1-10; sets the k order")
+    parser.add_argument("--seed", type=int, default=2026, help="base seed for the k order (same for all configs)")
+    parser.add_argument("--hold", type=float, default=60.0, help="high tier: seconds the radio stays off")
+    parser.add_argument("--start-delay", type=float, default=120.0,
+                        help="tier: seconds to wait after connecting before the batch (routes settle; default 120)")
+    parser.add_argument("--stop-after", type=float, default=0.0,
+                        help="tier: stop recording this many seconds after the last command (0 = Ctrl+C)")
     args = parser.parse_args()
 
     unknown = [p for p in args.inject if p not in args.ports]
@@ -197,20 +259,33 @@ def main() -> None:
     if not priorities or any(k not in (1, 2, 3) for k in priorities):
         sys.exit("--priorities must only contain 1, 2 or 3")
 
-    session = args.session or Path(args.out).stem
+    if args.tier and not args.inject:
+        sys.exit("--tier needs --inject PORT (the node(s) that send the batch)")
+    session = args.session or (f"{args.tier}-run{args.run:02d}" if args.tier else Path(args.out).stem)
     capture = Capture(Path(args.out), args.target, session)
     stagger = args.every / max(len(args.inject), 1)
-    threads = [threading.Thread(target=reader,
-                                args=(p, capture, not args.no_time_sync,
-                                      Injector(args.every, priorities, session, stagger * args.inject.index(p))
-                                      if p in args.inject else None),
-                                daemon=True)
+
+    def make_injector(port):
+        if port not in args.inject:
+            return None
+        if args.tier:
+            return TierInjector(args.tier, args.run, args.seed, args.hold, args.start_delay)
+        return Injector(args.every, priorities, session, stagger * args.inject.index(port))
+
+    injectors = {p: make_injector(p) for p in args.ports}
+    threads = [threading.Thread(target=reader, args=(p, capture, not args.no_time_sync, injectors[p]), daemon=True)
                for p in args.ports]
+    stop_at = None
+    if args.tier and args.stop_after > 0:
+        stop_at = max(i.last_send_at for i in injectors.values() if i) + args.stop_after
     for thread in threads:
         thread.start()
     print(f"Writing {capture.out_csv} (raw log: {capture.raw_log}). Press Ctrl+C to stop.")
     try:
         while not capture.stop.is_set() and any(t.is_alive() for t in threads):
+            if stop_at and time.time() >= stop_at:
+                print(f"\n--stop-after reached ({args.stop_after:g} s after the last command).")
+                break
             time.sleep(0.2)
     except KeyboardInterrupt:
         pass

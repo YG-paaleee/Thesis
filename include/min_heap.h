@@ -7,7 +7,8 @@
 struct EmergencyMessage {
     uint16_t id;             // 2-byte Message ID
     uint8_t  priority;       // k=1 (Medical SOS), k=2 (General Emergency), k=3 (Routine/Info)
-    uint32_t timestamp_tx;   // Creation time at the origin (carried in the packet; used for latency, not for queue order)
+    uint32_t timestamp_tx;   // Creation time at the origin, Unix seconds (carried in the packet; used for latency, not for queue order)
+    uint16_t timestamp_ms;   // milliseconds part of the creation time, 0..999 (carried in the packet)
     uint8_t  originNode;     // Node ID (1=V1 Main Hub, 2..5=V2..V5 Mini Hubs, 6=V6 Edge Node)
     uint8_t  destinationNode;
     uint8_t  ttl;
@@ -26,6 +27,9 @@ struct EmergencyMessage {
     // never compared against each other).
     uint32_t enqueuedAtMs;   // millis() when this node accepted the message
     uint32_t arrivalSeq;     // strictly increasing per node; final tie-breaker
+    // Logging only (CSV, Section 4.5.2 / 4.7):
+    uint8_t  queuePosAtEntry; // messages that would be sent before this one when it entered the queue
+    uint32_t dtnStoredAtMs;   // millis() when it entered the DTN buffer (0 = never)
 };
 
 // Queue order (Section 3.2, extended): primary = priority k (1 = most urgent),
@@ -103,6 +107,9 @@ public:
         EmergencyMessage msg = incoming;
         msg.enqueuedAtMs = millis();
         msg.arrivalSeq = nextArrivalSeq++;
+        size_t before = 0;                       // queue position on entry (send order)
+        for (size_t i = 0; i < currentSize; i++) if (messageOutranks(heap[i], msg)) before++;
+        msg.queuePosAtEntry = before > 255 ? 255 : (uint8_t)before;
 
         if (isFull()) {
             // Eviction policy (Section 3.3): drop the least urgent message, i.e. the

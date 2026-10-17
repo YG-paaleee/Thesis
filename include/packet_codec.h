@@ -25,7 +25,7 @@
 //   [1]      sourceNode
 //   [2..3]   heartbeat sequence number (big-endian)
 //   [4..5]   battery level in 0.1 % units, 0-1000 (big-endian); 0xFFFF = unknown
-//   [6]      traffic load: CAD busy events since the previous heartbeat (saturates at 255)
+//   [6]      traffic load: data-transmission backoffs (TBEB) since the previous heartbeat (saturates at 255)
 //   [7]      local queue occupancy (priority queue + DTN buffer, saturates at 255)
 //   --- Link-State Update (Section 3.1) ---
 //   [8..12]  sender's OWN one-hop row: edge weight to every other node, in node-ID
@@ -71,9 +71,10 @@ constexpr size_t HEARTBEAT_BODY_SIZE = 8 + LS_ROW_WIRE_SIZE + 3 + LS_ROW_WIRE_SI
 constexpr size_t HEARTBEAT_TAG_SIZE = 8;
 constexpr size_t HEARTBEAT_PACKET_SIZE = HEARTBEAT_BODY_SIZE + HEARTBEAT_TAG_SIZE;     // 29
 
-constexpr size_t BODY_FIXED_SIZE = 5;          // timestamp (4) + location length (1)
+// Body: Unix seconds (4) + milliseconds 0..999 (2) + location length (1) + location + message
+constexpr size_t BODY_FIXED_SIZE = 7;
 constexpr size_t MAX_TEXT_BYTES = 200;         // location + message
-constexpr size_t MAX_PLAINTEXT_BODY_SIZE = BODY_FIXED_SIZE + MAX_TEXT_BYTES; // 205
+constexpr size_t MAX_PLAINTEXT_BODY_SIZE = BODY_FIXED_SIZE + MAX_TEXT_BYTES; // 207 -> 224 encrypted
 
 // Size of the encrypted body for a given plaintext length (IV + PKCS#7-padded ciphertext).
 constexpr size_t encryptedBodySize(size_t plainLen) {
@@ -109,8 +110,8 @@ inline uint8_t headerPacketType(uint8_t header) { return header & 0x03; }
 
 // Builds the plaintext body. Fails (returns false) instead of truncating when
 // location + message exceed MAX_TEXT_BYTES, so the sender can reject the input.
-inline bool buildMessageBody(uint32_t timestamp, const char *location, const char *message,
-                             uint8_t *out, size_t capacity, size_t &outLen) {
+inline bool buildMessageBody(uint32_t timestamp, uint16_t timestampMs, const char *location,
+                             const char *message, uint8_t *out, size_t capacity, size_t &outLen) {
     outLen = 0;
     if (!out) return false;
     const size_t locLen = location ? strlen(location) : 0;
@@ -123,7 +124,10 @@ inline bool buildMessageBody(uint32_t timestamp, const char *location, const cha
     out[1] = (uint8_t)(timestamp >> 16);
     out[2] = (uint8_t)(timestamp >> 8);
     out[3] = (uint8_t)(timestamp);
-    out[4] = (uint8_t)locLen;
+    if (timestampMs > 999) timestampMs = 999;
+    out[4] = (uint8_t)(timestampMs >> 8);
+    out[5] = (uint8_t)(timestampMs);
+    out[6] = (uint8_t)locLen;
     if (locLen) memcpy(out + BODY_FIXED_SIZE, location, locLen);
     if (msgLen) memcpy(out + BODY_FIXED_SIZE + locLen, message, msgLen);
     outLen = total;
@@ -131,18 +135,20 @@ inline bool buildMessageBody(uint32_t timestamp, const char *location, const cha
 }
 
 // Parses a decrypted body into NUL-terminated strings. Rejects malformed lengths.
-inline bool parseMessageBody(const uint8_t *in, size_t len, uint32_t &timestamp,
+inline bool parseMessageBody(const uint8_t *in, size_t len, uint32_t &timestamp, uint16_t &timestampMs,
                              char *location, size_t locationSize,
                              char *message, size_t messageSize) {
     if (!in || !location || !message || locationSize == 0 || messageSize == 0 ||
         len < BODY_FIXED_SIZE || len > MAX_PLAINTEXT_BODY_SIZE) return false;
-    const size_t locLen = in[4];
+    const size_t locLen = in[6];
     if (BODY_FIXED_SIZE + locLen > len) return false;
     const size_t msgLen = len - BODY_FIXED_SIZE - locLen;
     if (locLen + msgLen > MAX_TEXT_BYTES || locLen >= locationSize || msgLen >= messageSize) return false;
 
     timestamp = ((uint32_t)in[0] << 24) | ((uint32_t)in[1] << 16) |
                 ((uint32_t)in[2] << 8) | (uint32_t)in[3];
+    timestampMs = (uint16_t)(((uint16_t)in[4] << 8) | in[5]);
+    if (timestampMs > 999) return false;
     memcpy(location, in + BODY_FIXED_SIZE, locLen);
     location[locLen] = '\0';
     memcpy(message, in + BODY_FIXED_SIZE + locLen, msgLen);

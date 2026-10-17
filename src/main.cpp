@@ -8,6 +8,7 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <esp_system.h>
+#include <esp_wifi.h>
 #include <time.h>
 #include <sys/time.h>
 #include <freertos/FreeRTOS.h>
@@ -20,6 +21,37 @@
 #include "network_core.h"
 #include "packet_codec.h"
 #include "link_state.h"
+#include "fifo_queue.h"
+
+// ---------------------------------------------------------------------------
+// Experimental configuration (Section 4.2.1). Set per build in platformio.ini
+// (environments baseline-nN, partial-nN, heuristic-nN, ablation-nN, full-nN);
+// the plain nodeN environments keep the defaults below.
+//   QUEUE_MODE_CFG     QUEUE_FIFO | QUEUE_HEAP           (default HEAP)
+//   DTN_ENABLED_CFG    0 = drop on link failure | 1 = DTN store-and-forward (default 1)
+//   RELAY_FILTER_CFG   RELAY_FILTER_NONE | _HEURISTIC | _CART   (default NONE)
+//   CONFIG_NAME_CFG    label written in the boot log and the CSV CONFIG row
+// ---------------------------------------------------------------------------
+#define QUEUE_FIFO 0
+#define QUEUE_HEAP 1
+#ifndef QUEUE_MODE_CFG
+#define QUEUE_MODE_CFG QUEUE_HEAP
+#endif
+#ifndef DTN_ENABLED_CFG
+#define DTN_ENABLED_CFG 1
+#endif
+#ifndef CONFIG_NAME_CFG
+#define CONFIG_NAME_CFG "dev"
+#endif
+#if QUEUE_MODE_CFG == QUEUE_FIFO
+using MessageQueue = FifoQueue;              // Config 1 (Baseline)
+#else
+using MessageQueue = PriorityMinHeap;        // Configs 2-5
+#endif
+constexpr bool DTN_ENABLED = DTN_ENABLED_CFG != 0;
+// Without DTN a message whose hop fails is retried right away (another route if
+// one exists) at most this many times in total, then dropped ("drop on link failure").
+constexpr uint8_t NO_DTN_MAX_ATTEMPTS = 3;
 
 // ---------------------------------------------------------
 // Network & Node Configuration (Barangay San Miguel Testbed)
@@ -31,7 +63,28 @@
 #endif
 const char *AP_SSID = AP_SSID_CFG;
 const byte DNS_PORT = 53;
-const uint8_t MAX_AP_CLIENTS = 25; // Connect-Queue-Disconnect Cap (Section 1.1 Limitations)
+// Phones allowed on each node's Wi-Fi at once (Section 1.1 Limitations says
+// "about 25"). The ESP32 Wi-Fi driver has its own hard cap, ESP_WIFI_MAX_CONN_NUM
+// (10 or 15 depending on the ESP-IDF version), and a larger request is not
+// honoured, so the effective cap is the smaller of the two. setup() prints the
+// value the driver actually accepted.
+constexpr uint8_t AP_CLIENTS_REQUESTED = 25;
+#ifdef ESP_WIFI_MAX_CONN_NUM
+constexpr uint8_t AP_CLIENTS_DRIVER_MAX = ESP_WIFI_MAX_CONN_NUM;
+#else
+constexpr uint8_t AP_CLIENTS_DRIVER_MAX = 10;
+#endif
+const uint8_t MAX_AP_CLIENTS = AP_CLIENTS_REQUESTED < AP_CLIENTS_DRIVER_MAX ? AP_CLIENTS_REQUESTED
+                                                                           : AP_CLIENTS_DRIVER_MAX;
+
+// /api/submit body: a JSON form of at most ~260 bytes of text plus field names.
+// Phones may send it in several TCP pieces; collectSubmitBody() joins them.
+constexpr size_t SUBMIT_BODY_MAX = 1024;
+struct SubmitBody {
+    size_t total;
+    size_t received;
+    char data[];
+};
 
 IPAddress apIP(192, 168, 4, 1);
 IPAddress netMsk(255, 255, 255, 0);
@@ -39,8 +92,8 @@ IPAddress netMsk(255, 255, 255, 0);
 DNSServer dnsServer;
 AsyncWebServer server(80);
 
-// Global Dual-Key Binary Min-Heap Priority Queue (Section 3.2)
-PriorityMinHeap priorityQueue;
+// Message queue: Dual-Key Binary Min-Heap (Section 3.2), or FIFO for the Baseline.
+MessageQueue priorityQueue;
 SemaphoreHandle_t priorityQueueMutex = nullptr;
 SemaphoreHandle_t liveIncidentMutex = nullptr;
 constexpr size_t LIVE_INCIDENT_CAPACITY = 20;   // data messages only (heartbeats never stored)
@@ -97,21 +150,24 @@ constexpr size_t SEEN_LIST_CAPACITY = 64;
 constexpr uint8_t BATTERY_ADC_PIN = 1;
 constexpr uint8_t BATTERY_ADC_ENABLE_PIN = 37;
 constexpr float BATTERY_DIVIDER_RATIO = 4.9f;      // 390k / 100k divider on the Heltec V3
-// Multiply readings by this after checking one board against a multimeter
-// (serial command "battery"). 1.0 = uncalibrated.
-constexpr float BATTERY_CALIBRATION = 1.0f;
+// Per-board calibration factor (multimeter / ADC reading), set with the serial
+// command "battery cal <volts measured with a multimeter>" and kept in flash.
+// 1.0 = uncalibrated. Allowed range 0.80-1.20.
+float batteryCalibration = 1.0f;
+constexpr uint32_t BATTERY_LOG_INTERVAL_MS = 60000UL;   // BATT row every minute (energy metric)
 // Where the battery level comes from:
-//   BATTERY_SOURCE_NONE     - CURRENT SETUP. USB power banks cannot be measured
-//       by the board, so heartbeats send battery = unknown and the CSV battery
-//       columns stay empty. Heartbeats still carry traffic load and queue size.
+//   BATTERY_SOURCE_LIPO     - CURRENT SETUP (decision D1, Oct 17): LiPo on the JST
+//       connector, measured on VBAT. Heartbeats carry the level (CART battery
+//       feature) and a BATT row logs the voltage every minute (R_drop, 4.7 metric 5).
+//       A node on USB power only (no LiPo) reports battery = unknown.
+//   BATTERY_SOURCE_NONE     - USB power banks only: battery always unknown.
 //   BATTERY_SOURCE_ESTIMATE - parked option for power banks (needs a USB power
 //       meter to calibrate). The level is an
 //       ESTIMATE: energy used = measured idle/TX currents x time in each state,
 //       subtracted from the bank's usable capacity. See the "Energy estimate"
 //       section below and the serial "energy" commands.
-//   BATTERY_SOURCE_LIPO     - LiPo on the JST connector, measured on VBAT.
 enum BatterySource { BATTERY_SOURCE_NONE, BATTERY_SOURCE_ESTIMATE, BATTERY_SOURCE_LIPO };
-constexpr BatterySource BATTERY_SOURCE = BATTERY_SOURCE_NONE;
+constexpr BatterySource BATTERY_SOURCE = BATTERY_SOURCE_LIPO;
 // DTN_RETENTION_MS (72 h, Section 3.3 TTL_max) is defined in network_core.h.
 constexpr uint32_t ACK_TIMEOUT_GUARD_MS = 2500UL;
 constexpr uint32_t DTN_POLL_BASE_MS = 10000UL;      // first poll 10 s after a route is lost
@@ -193,11 +249,16 @@ bool radioSilentRequested = false;
 
 // Heartbeat state (1-hop broadcast, no ACK, no forwarding).
 bool heartbeatPending = false;
+uint32_t heartbeatPendingSinceMs = 0;   // a heartbeat is never postponed longer than one interval
 bool radioTxIsHeartbeat = false;
 uint8_t heartbeatCadAttempts = 0;
 uint32_t nextHeartbeatTryAtMs = 0;
 uint16_t heartbeatSequence = 0;
-uint8_t cadBusyEventsSinceHeartbeat = 0;   // traffic-load feature sent in each heartbeat
+// Traffic-load feature sent in each heartbeat (Table 4.1: cumulative CSMA/CA
+// backoff cycles): how many times since the previous heartbeat this node had to
+// back off or defer a DATA transmission because the channel was busy (TBEB, in
+// handleChannelBusy). Busy checks made while sending heartbeats are not counted.
+uint8_t dataBackoffsSinceHeartbeat = 0;
 uint8_t heartbeatPacket[HEARTBEAT_PACKET_SIZE];
 
 // Latest heartbeat telemetry heard from each neighbour (feature cache for the
@@ -244,11 +305,18 @@ void resetMacBackoff();
 // columns, so the PC can keep only those lines and load them straight into pandas:
 // CSV,ms,node,event,origin,id,k,type,peer,rssi,snr,peer_batt_pct,peer_traffic,
 //     peer_queue,peer_hb_age_ms,self_batt_pct,self_used_mah,mac_retries,bytes,queue_len,dtn_len,
-//     ahead,bypassed,detail
+//     ahead,bypassed,cart_pf,cart_class,heur_class,wait_ms,queue_index,d_buffer_ms,detail
 //   ms      this node's uptime (millis)       node   node that wrote the row
 //   event   NEW | TX | RX | ACK | NOACK | DELIVER | DUP | STORE | EVICT | DROP | LINK |
 //           HB_OK | HB_MISS (CART training labels: expected heartbeat from peer arrived / lost;
-//           id = that heartbeat's sequence, peer_hb_age_ms = age when it was due)
+//           id = that heartbeat's sequence, peer_hb_age_ms = age when it was due) |
+//           FORWARD (a message left the DTN buffer, acknowledged by the next hop) | CONFIG | TIME |
+//           BATT (LiPo voltage at boot and every minute: detail mv=...; self_batt_pct = level)
+//   cart_pf,cart_class,heur_class  data TX rows: both relay-filter verdicts for the next hop
+//   wait_ms      data TX rows: total TBEB backoff/defer time before this send
+//   queue_index  data TX rows: messages that would be sent before this one when it
+//                entered the queue (FIFO: everything already queued; heap: more urgent ones)
+//   d_buffer_ms  FORWARD rows: how long the message was held in the DTN buffer
 //   origin,id  message key (heartbeats: source node + heartbeat sequence)
 //   peer    the other end of the radio link: previous hop for RX, next hop for TX/ACK/NOACK
 //   rssi,snr   RX rows: measured on this frame. Other rows: last frame heard from peer
@@ -279,6 +347,13 @@ struct CsvEvent {
     uint16_t dtnLen;
     uint16_t ahead;
     uint16_t bypassed;
+    bool hasVerdict;      // data TX rows: classification of the next hop (C10)
+    float cartPf;         // < 0 = no CART model
+    bool cartRisky;
+    bool heurRisky;
+    int32_t waitMs;       // data TX rows: total TBEB backoff wait before this send, ms (< 0 = n/a)
+    int16_t queueIndex;   // data TX rows: queue position when the message entered the queue (< 0 = n/a)
+    int32_t dBufferMs;    // FORWARD rows: custody time in the DTN buffer, ms (< 0 = n/a)
     bool hasPeerAge;      // log peerAgeMs instead of "now - last heartbeat"
     uint32_t peerAgeMs;
     const char *detail;
@@ -315,10 +390,10 @@ bool queuePush(const EmergencyMessage &msg) {
         return false;
     }
     EmergencyMessage evicted{};
-    const PriorityMinHeap::PushResult result = priorityQueue.push(msg, evicted);
+    const MessageQueue::PushResult result = priorityQueue.push(msg, evicted);
     xSemaphoreGive(priorityQueueMutex);
 
-    if (result == PriorityMinHeap::PUSH_EVICTED) {
+    if (result == MessageQueue::PUSH_EVICTED) {
         Serial.printf("[QUEUE] EVICT k=%u packet V%u#%04u to admit k=%u packet V%u#%04u.\n",
                       evicted.priority, evicted.originNode, evicted.id,
                       msg.priority, msg.originNode, msg.id);
@@ -327,14 +402,14 @@ bool queuePush(const EmergencyMessage &msg) {
         CsvEvent e = csvEvent("EVICT", evicted, 0);
         e.detail = detail;
         logCsv(e);
-    } else if (result == PriorityMinHeap::PUSH_REJECTED) {
+    } else if (result == MessageQueue::PUSH_REJECTED) {
         Serial.printf("[QUEUE] Full (%u); rejected k=%u packet V%u#%04u.\n",
-                      (unsigned int)PriorityMinHeap::capacity(), msg.priority, msg.originNode, msg.id);
+                      (unsigned int)MessageQueue::capacity(), msg.priority, msg.originNode, msg.id);
         CsvEvent e = csvEvent("DROP", msg, 0);
         e.detail = "queue_full";
         logCsv(e);
     }
-    return result != PriorityMinHeap::PUSH_REJECTED;
+    return result != MessageQueue::PUSH_REJECTED;
 }
 
 bool queuePeek(EmergencyMessage &msg) {
@@ -396,17 +471,28 @@ void formatRouteForLog(uint8_t originNode, uint16_t relayPath, char *out, size_t
     if (used < outSize) snprintf(out + used, outSize - used, "-%u", NODE_ID);
 }
 
-int32_t calculateIncidentLatencyMs(uint32_t transmittedAtSeconds) {
-    const time_t now = time(nullptr);
-    if (transmittedAtSeconds == 0 || now < 1700000000 ||
-        (uint64_t)now < transmittedAtSeconds) return -1;
-    const uint64_t elapsedMs = ((uint64_t)now - transmittedAtSeconds) * 1000ULL;
+// Wall-clock time in ms (Unix epoch), or 0 if this node's clock was never set.
+uint64_t epochNowMs() {
+    struct timeval tv;
+    gettimeofday(&tv, nullptr);
+    if (tv.tv_sec < (time_t)MIN_VALID_EPOCH) return 0;
+    return (uint64_t)tv.tv_sec * 1000ULL + (uint64_t)(tv.tv_usec / 1000);
+}
+
+// End-to-end latency in ms (Section 4.7 metric 2): hub clock at delivery minus
+// the creation time carried in the packet (seconds + milliseconds). Accurate
+// only as far as the origin's clock (phone or node) agrees with the hub's.
+int32_t calculateIncidentLatencyMs(uint32_t transmittedAtSeconds, uint16_t transmittedAtMs) {
+    const uint64_t nowMs = epochNowMs();
+    const uint64_t sentMs = (uint64_t)transmittedAtSeconds * 1000ULL + transmittedAtMs;
+    if (transmittedAtSeconds < MIN_VALID_EPOCH || nowMs == 0 || nowMs < sentMs) return -1;
+    const uint64_t elapsedMs = nowMs - sentMs;
     return elapsedMs <= INT32_MAX ? (int32_t)elapsedMs : -1;
 }
 
 void recordLiveIncident(uint16_t messageId, uint8_t priority, uint8_t packetType,
                         uint8_t originNode, uint16_t relayPath, uint32_t transmittedAtSeconds,
-                        const char *location, const char *message) {
+                        uint16_t transmittedAtMs, const char *location, const char *message) {
     if (!liveIncidentMutex ||
         xSemaphoreTake(liveIncidentMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
 
@@ -415,7 +501,7 @@ void recordLiveIncident(uint16_t messageId, uint8_t priority, uint8_t packetType
     incident.priority = priority;
     incident.packetType = packetType;
     incident.originNode = originNode;
-    incident.latencyMs = calculateIncidentLatencyMs(transmittedAtSeconds);
+    incident.latencyMs = calculateIncidentLatencyMs(transmittedAtSeconds, transmittedAtMs);
     incident.receivedAtMs = millis();
     incident.arrivalNo = ++liveIncidentArrivalCounter;
     buildIncidentPath(originNode, relayPath, incident.path, sizeof(incident.path));
@@ -536,7 +622,7 @@ uint32_t readBatteryPinMilliVolts() {
 }
 
 float readBatteryVoltage() {
-    return (float)readBatteryPinMilliVolts() * BATTERY_DIVIDER_RATIO * BATTERY_CALIBRATION / 1000.0f;
+    return (float)readBatteryPinMilliVolts() * BATTERY_DIVIDER_RATIO * batteryCalibration / 1000.0f;
 }
 
 // A single-cell LiPo is 3.0-4.25 V. Outside that range the reading is not a battery.
@@ -715,19 +801,90 @@ void handleEnergyCommand(const char *args) {
     logCsv(e);
 }
 
+Preferences batteryStore;
+
+void batteryLoadCalibration() {
+    batteryStore.begin("battery", true);
+    const float saved = batteryStore.getFloat("cal", 1.0f);
+    batteryStore.end();
+    batteryCalibration = (saved >= 0.80f && saved <= 1.20f) ? saved : 1.0f;
+}
+
 void printBatteryReport() {
     const uint32_t pinMv = readBatteryPinMilliVolts();
-    const float volts = (float)pinMv * BATTERY_DIVIDER_RATIO * BATTERY_CALIBRATION / 1000.0f;
-    Serial.printf("[BATTERY] Board %s (GPIO37 active %s). ADC pin %lu mV -> VBAT %.3f V (calibration x%.3f).\n",
+    const float volts = (float)pinMv * BATTERY_DIVIDER_RATIO * batteryCalibration / 1000.0f;
+    const uint16_t level = currentBatteryPermille();
+    char percent[12];
+    Serial.printf("[BATTERY] Board %s (GPIO37 active %s). ADC pin %lu mV -> VBAT %.3f V = %s (calibration x%.3f%s).\n",
                   batteryBoardIsV32 ? "V3.2" : "V3/V3.1", batteryCtrlActiveLevel == HIGH ? "HIGH" : "LOW",
-                  (unsigned long)pinMv, volts, BATTERY_CALIBRATION);
+                  (unsigned long)pinMv, volts, batteryText(level, percent, sizeof(percent)), batteryCalibration,
+                  batteryCalibration == 1.0f ? ", NOT CALIBRATED" : "");
     if (!batteryReadingPlausible(volts)) {
         Serial.println("[BATTERY] WARNING: not a LiPo voltage. Is a LiPo connected to the JST battery "
                        "connector? A USB power bank alone cannot be measured on VBAT.");
-    } else {
-        Serial.println("[BATTERY] To calibrate: measure the LiPo with a multimeter and set "
-                       "BATTERY_CALIBRATION = multimeter / this reading.");
+    } else if (batteryCalibration == 1.0f) {
+        Serial.println("[BATTERY] To calibrate: measure the LiPo with a multimeter, then type "
+                       "battery cal <volts>, e.g. battery cal 3.92");
     }
+}
+
+// "battery cal <volts>": factor = multimeter / current reading, saved in flash.
+// "battery cal reset": back to 1.0.
+void handleBatteryCalibration(const char *args) {
+    float factor = 1.0f;
+    if (strcmp(args, "reset") != 0) {
+        const float measured = strtof(args, nullptr);
+        const float raw = (float)readBatteryPinMilliVolts() * BATTERY_DIVIDER_RATIO / 1000.0f;
+        if (measured < 3.0f || measured > 4.35f || !batteryReadingPlausible(raw)) {
+            Serial.printf("[BATTERY] Calibration refused: multimeter %.3f V, board reads %.3f V uncalibrated. "
+                          "Both must be LiPo voltages (3.0-4.35 V).\n", measured, raw);
+            return;
+        }
+        factor = measured / raw;
+        if (factor < 0.80f || factor > 1.20f) {
+            Serial.printf("[BATTERY] Calibration refused: factor %.3f is outside 0.80-1.20. "
+                          "Check the multimeter reading and the LiPo connection.\n", factor);
+            return;
+        }
+    }
+    batteryCalibration = factor;
+    batteryStore.begin("battery", false);
+    batteryStore.putFloat("cal", factor);
+    batteryStore.end();
+    Serial.printf("[BATTERY] Calibration factor x%.4f saved in flash.\n", factor);
+    char detail[24];
+    snprintf(detail, sizeof(detail), "cal=%.4f", factor);
+    CsvEvent e = csvEvent("BATT", 0, 0, 0, 0, 0);
+    e.hasSelfEnergy = true;
+    e.detail = detail;
+    logCsv(e);
+    printBatteryReport();
+}
+
+// BATT row with the LiPo voltage: at boot and every minute (energy metric R_drop,
+// Section 4.7 metric 5). detail "mv=<millivolts>;cal=<factor>"; empty mv = no LiPo.
+void logBatteryVoltage(const char *why) {
+    if (BATTERY_SOURCE != BATTERY_SOURCE_LIPO) return;
+    const float volts = readBatteryVoltage();
+    char detail[48];
+    if (batteryReadingPlausible(volts))
+        snprintf(detail, sizeof(detail), "mv=%u;cal=%.4f;%s", (unsigned int)(volts * 1000.0f + 0.5f),
+                 batteryCalibration, why);
+    else
+        snprintf(detail, sizeof(detail), "mv=;no_lipo;%s", why);
+    CsvEvent e = csvEvent("BATT", 0, 0, 0, 0, 0);
+    e.hasSelfEnergy = true;
+    e.detail = detail;
+    logCsv(e);
+}
+
+void serviceBatteryLog() {
+    static uint32_t lastLogMs = 0;
+    const uint32_t now = millis();
+    if (lastLogMs != 0 && (uint32_t)(now - lastLogMs) < BATTERY_LOG_INTERVAL_MS) return;
+    const bool first = lastLogMs == 0;
+    lastLogMs = now ? now : 1;
+    logBatteryVoltage(first ? "boot" : "periodic");
 }
 
 CsvEvent csvEvent(const char *event, uint8_t origin, uint16_t id, uint8_t k, uint8_t type, uint8_t peer) {
@@ -740,6 +897,9 @@ CsvEvent csvEvent(const char *event, uint8_t origin, uint16_t id, uint8_t k, uin
     e.type = type;
     e.peer = peer;
     e.macRetries = -1;
+    e.waitMs = -1;
+    e.queueIndex = -1;
+    e.dBufferMs = -1;
     e.detail = "";
     return e;
 }
@@ -770,7 +930,8 @@ void fillQueueState(CsvEvent &e, const EmergencyMessage &msg) {
 void printCsvHeader() {
     Serial.println("CSV,ms,node,event,origin,id,k,type,peer,rssi,snr,peer_batt_pct,peer_traffic,"
                    "peer_queue,peer_hb_age_ms,self_batt_pct,self_used_mah,mac_retries,bytes,"
-                   "queue_len,dtn_len,ahead,bypassed,detail");
+                   "queue_len,dtn_len,ahead,bypassed,cart_pf,cart_class,heur_class,"
+                   "wait_ms,queue_index,d_buffer_ms,detail");
 }
 
 static char csvLine[200];
@@ -824,6 +985,16 @@ void logCsv(const CsvEvent &e) {
     if (e.bytes) append("%u,", e.bytes); else append(",");
     if (e.hasQueueState) append("%u,%u,%u,%u,", e.queueLen, e.dtnLen, e.ahead, e.bypassed);
     else append(",,,,");
+    if (e.hasVerdict) {
+        if (e.cartPf >= 0.0f) append("%.3f,%s,", e.cartPf, e.cartRisky ? "Risky" : "Safe");
+        else append(",,");
+        append("%s,", e.heurRisky ? "Risky" : "Safe");
+    } else {
+        append(",,,");
+    }
+    if (e.waitMs >= 0) append("%ld,", (long)e.waitMs); else append(",");
+    if (e.queueIndex >= 0) append("%d,", e.queueIndex); else append(",");
+    if (e.dBufferMs >= 0) append("%ld,", (long)e.dBufferMs); else append(",");
     append("%s\n", e.detail ? e.detail : "");
     if (csvUsed > 0 && csvLine[csvUsed - 1] != '\n') csvLine[csvUsed - 1] = '\n';   // truncated row
     Serial.write((const uint8_t *)csvLine, csvUsed);   // one write per row keeps rows intact
@@ -858,6 +1029,7 @@ void serviceHeartbeat() {
     const uint32_t now = millis();
     if (!deadlineReached(now, nextHeartbeatAtMs)) return;
     heartbeatPending = true;
+    heartbeatPendingSinceMs = now;
     heartbeatCadAttempts = 0;
     nextHeartbeatTryAtMs = now;
     scheduleNextHeartbeat(now);
@@ -869,8 +1041,7 @@ void transmitHeartbeat(uint32_t now) {
     if (radioIrqPending || radioRxPending) return;   // let pending RX be read first
     if (radioReceivingInProgress()) {                 // a neighbour is mid-frame: try a bit later
         nextHeartbeatTryAtMs = now + macSlotTimeMs + (esp_random() % macSlotTimeMs);
-        if (cadBusyEventsSinceHeartbeat < 255) cadBusyEventsSinceHeartbeat++;
-        return;
+        return;   // not counted as traffic: only data backoffs are (Table 4.1)
     }
 
     // 0 mV = no valid LiPo reading (e.g. powered from a USB power bank only).
@@ -896,7 +1067,7 @@ void transmitHeartbeat(uint32_t now) {
             relayedSequence = relayed.sequence;
             packLinkRow(relayedOwner, relayed.weight, relayedWire);
         }
-        buildHeartbeatBody(NODE_ID, sequence, batteryPermille, cadBusyEventsSinceHeartbeat,
+        buildHeartbeatBody(NODE_ID, sequence, batteryPermille, dataBackoffsSinceHeartbeat,
                            occupancy > 255 ? 255 : (uint8_t)occupancy, ownWire,
                            relayedOwner, relayedSequence, relayedOwner ? relayedWire : nullptr,
                            heartbeatPacket);
@@ -915,16 +1086,16 @@ void transmitHeartbeat(uint32_t now) {
             char battery[12];
             Serial.printf("[HB TX] V%u seq=%u batt=%s traffic=%u queue=%u row=[%u,%u,%u,%u,%u] relay=V%u (%u bytes)\n",
                           NODE_ID, sequence, batteryText(batteryPermille, battery, sizeof(battery)),
-                          cadBusyEventsSinceHeartbeat, (unsigned int)occupancy,
+                          dataBackoffsSinceHeartbeat, (unsigned int)occupancy,
                           ownWire[0], ownWire[1], ownWire[2], ownWire[3], ownWire[4], relayedOwner,
                           (unsigned int)HEARTBEAT_PACKET_SIZE);
             CsvEvent e = csvEvent("TX", NODE_ID, sequence, 0, PACKET_TYPE_HEARTBEAT, BROADCAST_NODE_ID);
             e.hasSelfEnergy = true;
-            e.macRetries = cadBusyEventsSinceHeartbeat;
+            e.macRetries = dataBackoffsSinceHeartbeat;
             e.bytes = HEARTBEAT_PACKET_SIZE;
             e.detail = "heartbeat";
             logCsv(e);
-            cadBusyEventsSinceHeartbeat = 0;
+            dataBackoffsSinceHeartbeat = 0;
         } else {
             Serial.printf("[HB TX] Start error %d; heartbeat skipped.\n", txState);
             radio.startReceive();
@@ -933,9 +1104,6 @@ void transmitHeartbeat(uint32_t now) {
     }
 
     radio.startReceive();
-    if (cadState == RADIOLIB_PREAMBLE_DETECTED && cadBusyEventsSinceHeartbeat < 255) {
-        cadBusyEventsSinceHeartbeat++;
-    }
     if (++heartbeatCadAttempts >= HEARTBEAT_MAX_CAD_ATTEMPTS) {
         heartbeatPending = false;
         Serial.println("[HB TX] Channel busy; heartbeat skipped until the next interval.");
@@ -944,7 +1112,20 @@ void transmitHeartbeat(uint32_t now) {
     }
 }
 
+void forgetAttempts(const EmergencyMessage &message);
+
 void completeDataAcknowledgment() {
+    forgetAttempts(activeTxMessage);
+    if (radioTxFromDtn && activeTxMessage.dtnStoredAtMs) {
+        // C16: the message leaves DTN custody; d_buffer = time it was held (Section 4.5.2).
+        const uint32_t heldMs = millis() - activeTxMessage.dtnStoredAtMs;
+        Serial.printf("[DTN] Packet V%u#%04u forwarded to V%u after %lu ms in the buffer.\n",
+                      activeTxMessage.originNode, activeTxMessage.id, radioTxNextHop, (unsigned long)heldMs);
+        CsvEvent f = csvEvent("FORWARD", activeTxMessage, radioTxNextHop);
+        f.dBufferMs = heldMs > INT32_MAX ? INT32_MAX : (int32_t)heldMs;
+        f.detail = "dtn";
+        logCsv(f);
+    }
     if (radioTxFromDtn) {
         dtnBuffer.remove(radioTxMessageId, radioTxOriginNode);
     } else {
@@ -1180,9 +1361,10 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
     }
 
     uint32_t timestampTx = 0;
+    uint16_t timestampMs = 0;
     char location[sizeof(EmergencyMessage::location)];
     char message[sizeof(EmergencyMessage::payload)];
-    if (!parseMessageBody(plaintext, plaintextLen, timestampTx,
+    if (!parseMessageBody(plaintext, plaintextLen, timestampTx, timestampMs,
                           location, sizeof(location), message, sizeof(message))) {
         Serial.printf("[LORA RX] Invalid message body for packet V%u#%04u.\n", originNode, messageId);
         CsvEvent e = csvEvent("DROP", originNode, messageId, priority, packetType, sourceNode);
@@ -1190,19 +1372,27 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
         logCsv(e);
         return;
     }
-
-    recordLiveIncident(messageId, priority, packetType, originNode, relayPath,
-                       timestampTx, location[0] ? location : "Unspecified", message);
+    memset(plaintext, 0, sizeof(plaintext));   // decrypted copy no longer needed
 
     if (destinationNode == NODE_ID) {
+        // Only the destination (Main Hub) keeps the readable message for its
+        // dashboard. Relays forward the encrypted bytes and keep no text or
+        // location (Section 4.3 Data Privacy: minimal PII on intermediate nodes).
+        recordLiveIncident(messageId, priority, packetType, originNode, relayPath,
+                           timestampTx, timestampMs, location[0] ? location : "Unspecified", message);
         char routeText[64];
         buildIncidentPath(originNode, relayPath, routeText, sizeof(routeText));
         Serial.printf("[LORA RX] Delivered packet V%u#%04u at V%u via %s: %s\n",
                       originNode, messageId, NODE_ID, routeText, message);
         char route[32];
         formatRouteForLog(originNode, relayPath, route, sizeof(route));
-        char detail[56];
-        snprintf(detail, sizeof(detail), "ts=%lu;route=%s", (unsigned long)timestampTx, route);
+        char detail[80];
+        const int32_t latencyMs = calculateIncidentLatencyMs(timestampTx, timestampMs);
+        if (latencyMs >= 0)
+            snprintf(detail, sizeof(detail), "ts=%lu.%03u;lat_ms=%ld;route=%s", (unsigned long)timestampTx,
+                     timestampMs, (long)latencyMs, route);
+        else
+            snprintf(detail, sizeof(detail), "ts=%lu.%03u;route=%s", (unsigned long)timestampTx, timestampMs, route);
         CsvEvent e = csvEvent("DELIVER", originNode, messageId, priority, packetType, sourceNode);
         e.detail = detail;
         logCsv(e);
@@ -1225,6 +1415,7 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
     forwarded.id = messageId;
     forwarded.priority = priority;
     forwarded.timestamp_tx = timestampTx;
+    forwarded.timestamp_ms = timestampMs;
     forwarded.originNode = originNode;
     forwarded.destinationNode = destinationNode;
     forwarded.ttl = ttl - 1;
@@ -1232,8 +1423,9 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
     forwarded.expiresAtMs = millis() + DTN_RETENTION_MS;
     forwarded.retryExponent = 0;   // failed DTN polls
     forwarded.relayPath = relayPathAppend(relayPath, NODE_ID);   // this node is the next relay
-    strncpy(forwarded.location, location, sizeof(forwarded.location) - 1);
-    strncpy(forwarded.payload, message, sizeof(forwarded.payload) - 1);
+    // location/payload stay empty on relays: only the encrypted bytes are sent on.
+    memset(location, 0, sizeof(location));
+    memset(message, 0, sizeof(message));
     forwarded.encryptedLen = (uint8_t)encryptedLen;
     memcpy(forwarded.encryptedData, packet + FRAME_PREFIX_SIZE, encryptedLen);
 
@@ -1334,6 +1526,116 @@ void noteLinkQuality(uint8_t neighborNode, float rssi, float snr) {
     linkQualityAddSample(linkQuality[neighborNode - 1], rssi, snr, millis());
 }
 
+// ---------------------------------------------------------------------------
+// Relay filter (Sections 3.4 and 4.2.1)
+//   RELAY_FILTER_NONE       Baseline / Partial: no filter. If a trained model is
+//                           present, CART still runs in shadow mode for the logs.
+//   RELAY_FILTER_HEURISTIC  a neighbour failing the static rule gets no edge (255).
+//   RELAY_FILTER_CART       each outgoing edge is scaled by M = 1 + alpha x Pf.
+// Chosen per build (platformio.ini: -D RELAY_FILTER_CFG=...); default NONE.
+// Both verdicts are logged on every data TX row (cart_pf, cart_class, heur_class),
+// whichever filter is active, so CART and the heuristic can be compared on the
+// same transmissions (McNemar's test, Section 4.7).
+// ---------------------------------------------------------------------------
+#define RELAY_FILTER_NONE 0
+#define RELAY_FILTER_HEURISTIC 1
+#define RELAY_FILTER_CART 2
+#ifndef RELAY_FILTER_CFG
+#define RELAY_FILTER_CFG RELAY_FILTER_NONE
+#endif
+#if __has_include("cart_model.h")
+#include "cart_model.h"
+#define CART_MODEL_AVAILABLE 1
+#else
+#define CART_MODEL_AVAILABLE 0
+#endif
+#if RELAY_FILTER_CFG == RELAY_FILTER_CART && !CART_MODEL_AVAILABLE
+#error "RELAY_FILTER_CART needs include/cart_model.h: train it first with tools/train_cart.py"
+#endif
+constexpr uint8_t RELAY_FILTER = RELAY_FILTER_CFG;
+
+// Weight multiplier M = 1 + alpha x Pf (Section 3.4). alpha = 2 lets a link that
+// fails every time cost 3x its measured weight. Tune with -D CART_ALPHA_CFG=...
+#ifndef CART_ALPHA_CFG
+#define CART_ALPHA_CFG 2.0f
+#endif
+constexpr float CART_ALPHA = CART_ALPHA_CFG;
+
+// Heuristic rule (decision D4): a neighbour is usable only if all four hold.
+constexpr float HEURISTIC_MIN_RSSI_DBM = -110.0f;
+constexpr float HEURISTIC_MIN_SNR_DB = -5.0f;
+constexpr uint32_t HEURISTIC_MAX_HEARTBEAT_AGE_MS = 75000UL;
+constexpr float HEURISTIC_MIN_BATTERY_PCT = 20.0f;
+
+const char *relayFilterName() {
+    return RELAY_FILTER == RELAY_FILTER_CART ? "CART" : RELAY_FILTER == RELAY_FILTER_HEURISTIC ? "heuristic" : "none";
+}
+
+struct NeighborVerdict {
+    bool known;        // a heartbeat from this neighbour has been heard
+    float pf;          // CART failure probability, < 0 = no model or no data
+    bool cartRisky;    // pf >= CART_RISKY_THRESHOLD
+    bool heurRisky;    // fails the D4 rule
+};
+
+// Classifies one neighbour from its latest heartbeat telemetry (neighborTable):
+// the same values the CART training rows were built from.
+NeighborVerdict classifyNeighbor(uint8_t node, uint32_t now) {
+    NeighborVerdict v{false, -1.0f, false, true};
+    if (node < 1 || node > NETWORK_NODE_COUNT || node == NODE_ID) return v;
+    const NeighborInfo &n = neighborTable[node - 1];
+    if (!n.valid) return v;                                  // never heard: heuristic says Risky
+    v.known = true;
+    const uint32_t ageMs = (uint32_t)(now - n.lastHeardMs);
+    const bool batteryKnown = n.batteryPermille != BATTERY_UNKNOWN;
+    const float batteryPct = batteryKnown ? n.batteryPermille / 10.0f : 100.0f;   // unknown: no battery penalty
+    v.heurRisky = n.rssi <= HEURISTIC_MIN_RSSI_DBM || n.snr <= HEURISTIC_MIN_SNR_DB ||
+                  ageMs > HEURISTIC_MAX_HEARTBEAT_AGE_MS ||
+                  (batteryKnown && batteryPct < HEURISTIC_MIN_BATTERY_PCT);
+#if CART_MODEL_AVAILABLE
+    float x[CART_FEATURE_COUNT] = {};
+#ifdef CART_USES_RSSI
+    x[CART_F_RSSI] = n.rssi;
+#endif
+#ifdef CART_USES_SNR
+    x[CART_F_SNR] = n.snr;
+#endif
+#ifdef CART_USES_BATTERY
+    x[CART_F_BATTERY] = batteryPct;
+#endif
+#ifdef CART_USES_TRAFFIC
+    x[CART_F_TRAFFIC] = n.trafficLoad;
+#endif
+#ifdef CART_USES_HB_AGE
+    x[CART_F_HB_AGE] = (float)(ageMs > 300000UL ? 300000UL : ageMs);
+#endif
+    v.pf = cartFailureProbability(x);
+    v.cartRisky = v.pf >= CART_RISKY_THRESHOLD;
+#endif
+    return v;
+}
+
+// Applies the build's relay filter to THIS node's edges (the decision is local:
+// each node judges its own neighbours). Runs after the graph is built, before Dijkstra.
+void applyRelayFilter(uint8_t graph[NETWORK_NODE_COUNT][NETWORK_NODE_COUNT], uint32_t now) {
+    if (RELAY_FILTER == RELAY_FILTER_NONE) return;
+    const uint8_t self = NODE_ID - 1;
+    for (uint8_t node = 1; node <= NETWORK_NODE_COUNT; node++) {
+        const uint8_t i = node - 1;
+        if (node == NODE_ID || graph[self][i] == 0 || graph[self][i] == LINK_WEIGHT_NONE) continue;
+        const NeighborVerdict v = classifyNeighbor(node, now);
+        uint8_t weight = graph[self][i];
+        if (RELAY_FILTER == RELAY_FILTER_HEURISTIC) {
+            if (v.heurRisky) weight = LINK_WEIGHT_NONE;
+        } else if (v.pf >= 0.0f) {                           // CART: w' = w x (1 + alpha x Pf)
+            const float scaled = weight * (1.0f + CART_ALPHA * v.pf);
+            weight = scaled >= LINK_WEIGHT_MAX ? LINK_WEIGHT_MAX : (uint8_t)(scaled + 0.5f);
+        }
+        graph[self][i] = weight;
+        graph[i][self] = weight;
+    }
+}
+
 // This node's own row of the adjacency matrix: measured weight to each neighbour
 // heard recently; 255 if not heard for LINK_STALE_MS or (optionally) marked DOWN
 // after ACK failures.
@@ -1389,7 +1691,7 @@ bool selectNextHop(const EmergencyMessage &message, uint8_t &nextHopNode, uint32
             graph[other][node - 1] = LINK_WEIGHT_NONE;
         }
     }
-    // (CART hook, later: scale our outgoing edges by M = 1 + alpha x Pf here.)
+    applyRelayFilter(graph, now);   // heuristic: drop risky neighbours; CART: scale by 1 + alpha x Pf
     return dijkstraNextHop(graph, NODE_ID, message.destinationNode, nextHopNode, pathCost) &&
            nextHopNode != NODE_ID;
 }
@@ -1425,9 +1727,11 @@ uint32_t shortRetryDelayMs() {
 }
 
 // Moves a queue message into DTN custody, evicting a less urgent one if full.
-bool storeInDtn(const EmergencyMessage &message, uint32_t now) {
+bool storeInDtn(const EmergencyMessage &original, uint32_t now) {
     bool evicted = false;
     EmergencyMessage evictedMessage{};
+    EmergencyMessage message = original;
+    message.dtnStoredAtMs = now ? now : 1;   // custody start, for the FORWARD row's d_buffer
     if (!dtnBuffer.storeWithEviction(message, now, evicted, evictedMessage)) return false;
     queueRemoveById(message.id, message.originNode);
     if (evicted) {
@@ -1451,7 +1755,52 @@ bool storeInDtn(const EmergencyMessage &message, uint32_t now) {
 
 // Defers a message that cannot be sent right now, without blocking the queue.
 // routeExists=false -> long poll; true -> short retry.
+// Without DTN (Configs 1-3): failed hops per message, so a message is dropped
+// after NO_DTN_MAX_ATTEMPTS tries instead of being held.
+struct HopAttempts { uint8_t origin; uint16_t id; uint8_t count; };
+HopAttempts hopAttempts[8] = {};
+
+uint8_t countFailedAttempt(const EmergencyMessage &message) {
+    HopAttempts *slot = nullptr;
+    for (HopAttempts &a : hopAttempts) {
+        if (a.count && a.origin == message.originNode && a.id == message.id) { slot = &a; break; }
+    }
+    if (!slot) {
+        for (HopAttempts &a : hopAttempts) if (!a.count) { slot = &a; break; }
+        if (!slot) slot = &hopAttempts[esp_random() % 8];
+        *slot = HopAttempts{message.originNode, message.id, 0};
+    }
+    return ++slot->count;
+}
+
+void forgetAttempts(const EmergencyMessage &message) {
+    for (HopAttempts &a : hopAttempts) {
+        if (a.count && a.origin == message.originNode && a.id == message.id) a.count = 0;
+    }
+}
+
+void dropWithoutDtn(const EmergencyMessage &message, const char *reason) {
+    queueRemoveById(message.id, message.originNode);
+    forgetAttempts(message);
+    Serial.printf("[DROP] Packet V%u#%04u dropped (%s; DTN off in this configuration).\n",
+                  message.originNode, message.id, reason);
+    CsvEvent e = csvEvent("DROP", message, 0);
+    e.detail = reason;
+    logCsv(e);
+}
+
 void deferUnsentMessage(const EmergencyMessage &message, bool fromDtn, bool routeExists, uint32_t now) {
+    if (!DTN_ENABLED) {
+        // "Drop on link failure" (Table 4.1, Configs 1-3): no store-and-forward.
+        if (!routeExists) {
+            dropWithoutDtn(message, "no_route");
+        } else if (countFailedAttempt(message) >= NO_DTN_MAX_ATTEMPTS) {
+            dropWithoutDtn(message, "retries_exhausted");
+        } else {
+            nextMacAttemptAt = now + shortRetryDelayMs();   // stays in the queue, retried shortly
+        }
+        return;
+    }
     if (!fromDtn && !storeInDtn(message, now)) {
         // DTN is full of equal/higher priority traffic: the message stays at the
         // head of the priority queue and the MAC pauses before trying again.
@@ -1509,12 +1858,36 @@ bool radioReceivingInProgress() {
 
 // Truncated Binary Exponential Backoff (Section 3.5.1):
 // Wait = Random(0, 2^c - 1) x SlotTime, c capped at MAC_MAX_BACKOFF_EXPONENT.
+// Total TBEB backoff/defer time the current message has waited (C16, "Wait" in 4.5.2).
+uint16_t macWaitMessageId = 0;
+uint8_t macWaitOriginNode = 0;
+uint32_t macWaitAccumMs = 0;
+
+void addMacWait(const EmergencyMessage &msg, uint32_t waitMs) {
+    if (msg.id != macWaitMessageId || msg.originNode != macWaitOriginNode) {
+        macWaitMessageId = msg.id;
+        macWaitOriginNode = msg.originNode;
+        macWaitAccumMs = 0;
+    }
+    macWaitAccumMs += waitMs;
+}
+
+// Wait logged on the TX row, then cleared for the next message.
+uint32_t takeMacWait(const EmergencyMessage &msg) {
+    const uint32_t wait = (msg.id == macWaitMessageId && msg.originNode == macWaitOriginNode) ? macWaitAccumMs : 0;
+    macWaitAccumMs = 0;
+    macWaitMessageId = 0;
+    macWaitOriginNode = 0;
+    return wait;
+}
+
 void handleChannelBusy(const EmergencyMessage &msg, bool fromDtn, const char *reason) {
     macBusyRetries++;
-    if (cadBusyEventsSinceHeartbeat < 255) cadBusyEventsSinceHeartbeat++;
+    if (dataBackoffsSinceHeartbeat < 255) dataBackoffsSinceHeartbeat++;
     const uint32_t now = millis();
     if (macBusyRetries >= MAC_MAX_CAD_RETRIES) {
         const uint32_t deferMs = maxFrameAirtimeMs + (esp_random() % macSlotTimeMs);
+        addMacWait(msg, deferMs);
         Serial.printf("[LORA CAD] Channel still busy after %u checks; deferring packet V%u#%04u by %lu ms.\n",
                       MAC_MAX_CAD_RETRIES, msg.originNode, msg.id, (unsigned long)deferMs);
         resetMacBackoff();
@@ -1525,6 +1898,7 @@ void handleChannelBusy(const EmergencyMessage &msg, bool fromDtn, const char *re
 
     const uint32_t slotCount = 1U << macBackoffExponent;
     const uint32_t backoffMs = (esp_random() % slotCount) * macSlotTimeMs;
+    addMacWait(msg, backoffMs);
     if (macBackoffExponent < MAC_MAX_BACKOFF_EXPONENT) macBackoffExponent++;
     nextMacAttemptAt = now + backoffMs;
     if (fromDtn) deferDtnShort(msg, now, backoffMs);
@@ -1532,8 +1906,27 @@ void handleChannelBusy(const EmergencyMessage &msg, bool fromDtn, const char *re
                   reason, macBusyRetries, MAC_MAX_CAD_RETRIES, (unsigned long)backoffMs);
 }
 
+// Radio silenced (link failure / blackout test, Table 4.4 High tier): the node has
+// no route, so queued messages are handled as "no route" -- DTN builds move them
+// into the store-and-forward buffer (B_max and eviction apply), builds without DTN
+// drop them. They leave the buffer once the radio is back on.
+void handleQueueWhileSilent() {
+    if ((int32_t)(millis() - nextMacAttemptAt) < 0) return;
+    EmergencyMessage head{};
+    if (!queuePeek(head)) return;
+    if (head.destinationNode == NODE_ID) {
+        queueRemoveById(head.id, head.originNode);
+        return;
+    }
+    deferUnsentMessage(head, false, false, millis());
+}
+
 void serviceRadioMac() {
-    if (!radioReady || radioSilent) return;
+    if (!radioReady) return;
+    if (radioSilent) {
+        handleQueueWhileSilent();
+        return;
+    }
 
     if (radioAckTxInFlight) {
         if (!radioTxDone) return;
@@ -1589,10 +1982,20 @@ void serviceRadioMac() {
     // is idle, unless a k=1 SOS is ready to send: SOS keeps the next transmission
     // window (Section 3.2), and the heartbeat waits for the following one.
     if (heartbeatPending && deadlineReached(millis(), nextHeartbeatTryAtMs)) {
+        // A k=1 SOS keeps the slot only if it can actually be sent now: the MAC is
+        // not backing off and a route exists. Otherwise an SOS with no route would
+        // block heartbeats forever, neighbours would drop the link, and the route
+        // would never come back (deadlock). A heartbeat also never waits more than
+        // one interval.
         EmergencyMessage head{};
-        const bool sosWaiting = (queuePeek(head) && head.priority == 1) ||
-                                (dtnBuffer.peekDue(millis(), head) && head.priority == 1);
-        if (!sosWaiting) {
+        const uint32_t nowMs = millis();
+        const bool haveSos = (queuePeek(head) && head.priority == 1) ||
+                             (dtnBuffer.peekDue(nowMs, head) && head.priority == 1);
+        uint8_t sosHop = 0;
+        const bool sosSendable = haveSos && (int32_t)(nowMs - nextMacAttemptAt) >= 0 &&
+                                 selectNextHop(head, sosHop, nowMs);
+        const bool heartbeatOverdue = (uint32_t)(nowMs - heartbeatPendingSinceMs) >= HEARTBEAT_INTERVAL_MS;
+        if (!sosSendable || heartbeatOverdue) {
             transmitHeartbeat(millis());
             return;
         }
@@ -1707,6 +2110,14 @@ void serviceRadioMac() {
             // Feature row for relay viability: peer telemetry at decision time;
             // the matching ACK / NOACK row for the same origin,id,peer is the label.
             CsvEvent e = csvEvent("TX", msg, nextHopNode);
+            const NeighborVerdict verdict = classifyNeighbor(nextHopNode, millis());   // C10: log both verdicts
+            const uint32_t waited = takeMacWait(msg);
+            e.waitMs = waited > INT32_MAX ? INT32_MAX : (int32_t)waited;
+            e.queueIndex = msg.queuePosAtEntry;
+            e.hasVerdict = true;
+            e.cartPf = verdict.pf;
+            e.cartRisky = verdict.cartRisky;
+            e.heurRisky = verdict.heurRisky;
             e.macRetries = macBusyRetries;
             e.bytes = (uint16_t)packetLen;
             fillQueueState(e, msg);
@@ -1740,11 +2151,11 @@ void serviceRadioMac() {
 // Creates a message originating at this node and queues it for the hub.
 // Used by the captive portal (/api/submit) and by the serial "sos" command
 // (automated traffic for field tests and CART data collection).
-// timestampTx = creation time (Unix s); 0 = use this node's clock.
+// timestampTx/timestampMs = creation time (Unix s + ms); timestampTx 0 = use this node's clock.
 // ---------------------------------------------------------------------------
 enum SubmitResult : uint8_t { SUBMIT_OK, SUBMIT_BAD_SIZE, SUBMIT_ENCRYPT_FAILED, SUBMIT_QUEUE_FULL };
 
-SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, const char *location,
+SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, uint16_t timestampMs, const char *location,
                               const char *message, const char *via, EmergencyMessage &msg) {
     if (priority < 1 || priority > 3) priority = 1;
     if (!location || !location[0]) location = "Unspecified";
@@ -1765,10 +2176,15 @@ SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, const char
     msg.priority = priority;
     // Creation time: the phone's clock if it sent one, else this node's clock
     // when it has been set (serial "time" command), else seconds since boot.
-    const time_t nodeClock = time(nullptr);
-    const uint32_t fallbackTs = nodeClock >= (time_t)MIN_VALID_EPOCH ? (uint32_t)nodeClock
-                                                                    : (uint32_t)(millis() / 1000);
-    msg.timestamp_tx = timestampTx ? timestampTx : fallbackTs;
+    if (timestampTx) {
+        msg.timestamp_tx = timestampTx;
+        msg.timestamp_ms = timestampMs > 999 ? 0 : timestampMs;
+    } else {
+        const uint64_t nodeMs = epochNowMs();
+        const uint64_t fallbackMs = nodeMs ? nodeMs : (uint64_t)millis();   // uptime if the clock is unset
+        msg.timestamp_tx = (uint32_t)(fallbackMs / 1000ULL);
+        msg.timestamp_ms = (uint16_t)(fallbackMs % 1000ULL);
+    }
     msg.originNode = NODE_ID;
     msg.destinationNode = HUB_NODE_ID;
     msg.ttl = INITIAL_TTL;
@@ -1785,7 +2201,7 @@ SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, const char
     size_t plainLen = 0;
     size_t encLen = 0;
     const bool encryptSuccess =
-        buildMessageBody(msg.timestamp_tx, msg.location, msg.payload,
+        buildMessageBody(msg.timestamp_tx, msg.timestamp_ms, msg.location, msg.payload,
                          plainBody, sizeof(plainBody), plainLen) &&
         AESCrypto::encrypt(plainBody, plainLen, msg.encryptedData, encLen,
                            MAX_ENCRYPTED_BODY_SIZE);
@@ -1805,7 +2221,8 @@ SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, const char
     seenListAdd(msg.originNode, msg.id);
     {
         char detail[40];
-        snprintf(detail, sizeof(detail), "ts=%lu;via=%s", (unsigned long)msg.timestamp_tx, via);
+        snprintf(detail, sizeof(detail), "ts=%lu.%03u;via=%s", (unsigned long)msg.timestamp_tx,
+                 msg.timestamp_ms, via);
         CsvEvent e = csvEvent("NEW", msg, 0);
         e.bytes = (uint16_t)(msg.encryptedLen + FRAME_OVERHEAD_SIZE);
         e.detail = detail;
@@ -1829,6 +2246,28 @@ SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, const char
     Serial.printf("  Connected Stns: %u / %u max\n", WiFi.softAPgetStationNum(), MAX_AP_CLIENTS);
     Serial.println("=======================================================\n");
     return SUBMIT_OK;
+}
+
+// Joins the /api/submit body when it arrives in several pieces. The buffer
+// hangs off the request and the web server frees it with the request.
+void collectSubmitBody(AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    if (index == 0) {
+        if (request->_tempObject) {
+            free(request->_tempObject);
+            request->_tempObject = nullptr;
+        }
+        if (total == 0 || total > SUBMIT_BODY_MAX) return;   // answered in the request handler
+        SubmitBody *body = (SubmitBody *)malloc(sizeof(SubmitBody) + total + 1);
+        if (!body) return;                                   // out of memory: answered as incomplete
+        body->total = total;
+        body->received = 0;
+        body->data[total] = '\0';
+        request->_tempObject = body;
+    }
+    SubmitBody *body = (SubmitBody *)request->_tempObject;
+    if (!body || index + len > body->total) return;
+    memcpy(body->data + index, data, len);
+    if (index + len > body->received) body->received = index + len;
 }
 
 void setupWebServerRoutes() {
@@ -1888,10 +2327,20 @@ void setupWebServerRoutes() {
     server.on("/hotspot-detect.html", HTTP_GET, [](AsyncWebServerRequest *request) { request->redirect("/"); });
 
     // 3. Emergency Submission Endpoint (Intake & Security Pipeline)
-    server.on("/api/submit", HTTP_POST, [](AsyncWebServerRequest *request) {}, NULL,
-        [](AsyncWebServerRequest *request, uint8_t *data, size_t len, size_t index, size_t total) {
+    // The body handler (collectSubmitBody) runs once per received piece; this
+    // handler runs once, after the whole body has arrived.
+    server.on("/api/submit", HTTP_POST, [](AsyncWebServerRequest *request) {
+            if (request->contentLength() > SUBMIT_BODY_MAX) {
+                request->send(413, "application/json", "{\"status\":\"error\",\"message\":\"Request too large.\"}");
+                return;
+            }
+            const SubmitBody *body = (const SubmitBody *)request->_tempObject;
+            if (!body || body->received != body->total) {
+                request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"Empty or incomplete request. Please try again.\"}");
+                return;
+            }
             JsonDocument doc;
-            DeserializationError err = deserializeJson(doc, data, len);
+            DeserializationError err = deserializeJson(doc, body->data, body->total);
 
             if (err) {
                 request->send(400, "application/json", "{\"status\":\"error\",\"message\":\"Malformed JSON payload\"}");
@@ -1916,11 +2365,12 @@ void setupWebServerRoutes() {
             const char *location = doc["location"] | "Unspecified";
             const char *message = doc["message"] | "";
             const uint32_t phoneTs = (uint32_t)(doc["timestamp"] | (uint32_t)0);
+            const uint16_t phoneTsMs = (uint16_t)(doc["timestamp_ms"] | (uint16_t)0);
 
             // Steps C-E: body, encryption, min-heap insert, logging (shared with the
             // serial "sos" command used for automated field data collection).
             EmergencyMessage msg{};
-            const SubmitResult result = submitOwnMessage(priority, phoneTs, location, message, "web", msg);
+            const SubmitResult result = submitOwnMessage(priority, phoneTs, phoneTsMs, location, message, "web", msg);
             if (result == SUBMIT_BAD_SIZE) {
                 char errorJson[160];
                 snprintf(errorJson, sizeof(errorJson),
@@ -1946,8 +2396,8 @@ void setupWebServerRoutes() {
             AsyncWebServerResponse *response = request->beginResponse(200, "application/json", responseJson);
             response->addHeader("Connection", "close"); // Instruct client to close connection to free socket
             request->send(response);
-        }
-    );
+        },
+        NULL, collectSubmitBody);
 
     // Fallback: Redirect any other URL to Captive Portal
     server.onNotFound([](AsyncWebServerRequest *request) {
@@ -2020,6 +2470,18 @@ void printRoutingTable() {
                       NODE_ID, node, q.rssiAvg, q.snrAvg, linkWeightFromQuality(q.rssiAvg, q.snrAvg),
                       (unsigned long)((now - q.lastFrameMs) / 1000));
     }
+    Serial.printf("[ROUTES] Relay filter: %s%s\n", relayFilterName(),
+                  CART_MODEL_AVAILABLE ? (RELAY_FILTER == RELAY_FILTER_CART ? "" : " (CART model loaded, shadow mode)")
+                                       : " (no CART model in this build)");
+    for (uint8_t node = 1; node <= NETWORK_NODE_COUNT; node++) {
+        if (node == NODE_ID || !neighborTable[node - 1].valid) continue;
+        const NeighborVerdict v = classifyNeighbor(node, now);
+        if (v.pf >= 0.0f)
+            Serial.printf("[ROUTES]  V%u: CART Pf %.2f -> %s (x%.2f weight); heuristic %s\n", node, v.pf,
+                          v.cartRisky ? "Risky" : "Safe", 1.0f + CART_ALPHA * v.pf, v.heurRisky ? "Risky" : "Safe");
+        else
+            Serial.printf("[ROUTES]  V%u: heuristic %s\n", node, v.heurRisky ? "Risky" : "Safe");
+    }
     EmergencyMessage probe{};
     probe.originNode = NODE_ID;
     probe.destinationNode = HUB_NODE_ID;
@@ -2061,7 +2523,7 @@ void handleSosCommand(const char *args) {
         message = bar + 1;
     }
     EmergencyMessage msg{};
-    const SubmitResult result = submitOwnMessage((uint8_t)k, 0, location, message, "serial", msg);
+    const SubmitResult result = submitOwnMessage((uint8_t)k, 0, 0, location, message, "serial", msg);
     if (result == SUBMIT_BAD_SIZE)
         Serial.printf("[CMD] Location + message must be 1-%u bytes.\n", (unsigned int)MAX_TEXT_BYTES);
     else if (result != SUBMIT_OK)
@@ -2079,6 +2541,9 @@ void handleSerialCommand(const char *command) {
         printNodeStatus();
     } else if (!strcmp(command, "routes")) {
         printRoutingTable();
+    } else if (!strncmp(command, "battery cal ", 12)) {
+        if (BATTERY_SOURCE == BATTERY_SOURCE_LIPO) handleBatteryCalibration(command + 12);
+        else Serial.println("[BATTERY] Calibration needs BATTERY_SOURCE_LIPO.");
     } else if (!strcmp(command, "battery")) {
         if (BATTERY_SOURCE == BATTERY_SOURCE_ESTIMATE) printEnergyReport();
         else if (BATTERY_SOURCE == BATTERY_SOURCE_LIPO) printBatteryReport();
@@ -2087,27 +2552,34 @@ void handleSerialCommand(const char *command) {
                (!strcmp(command, "energy") || !strncmp(command, "energy ", 7))) {
         handleEnergyCommand(command[6] ? command + 7 : "");
     } else if (!strncmp(command, "time ", 5)) {
-        // Sets this node's real-time clock (Unix seconds). tools/capture_telemetry.py
-        // sends it automatically to every node it connects to.
-        const unsigned long epoch = strtoul(command + 5, nullptr, 10);
+        // Sets this node's real-time clock: "time <unix-seconds>[.milliseconds]".
+        // tools/capture_telemetry.py sends it (with ms) to every node it connects to.
+        char *fraction = nullptr;
+        const unsigned long epoch = strtoul(command + 5, &fraction, 10);
+        unsigned long ms = 0;
+        if (fraction && *fraction == '.') {
+            unsigned long scale = 100;
+            for (const char *c = fraction + 1; *c >= '0' && *c <= '9' && scale; c++, scale /= 10) ms += (*c - '0') * scale;
+        }
         if (epoch >= MIN_VALID_EPOCH) {
             struct timeval tv;
             tv.tv_sec = (time_t)epoch;
-            tv.tv_usec = 0;
+            tv.tv_usec = (suseconds_t)(ms * 1000UL);
             settimeofday(&tv, nullptr);
-            Serial.printf("[CMD] Clock set to %lu (Unix seconds).\n", epoch);
-            char detail[24];
-            snprintf(detail, sizeof(detail), "epoch=%lu", epoch);
+            Serial.printf("[CMD] Clock set to %lu.%03lu (Unix seconds).\n", epoch, ms);
+            char detail[32];
+            snprintf(detail, sizeof(detail), "epoch=%lu.%03lu", epoch, ms);
             CsvEvent e = csvEvent("TIME", 0, 0, 0, 0, 0);
             e.detail = detail;
             logCsv(e);
         } else {
-            Serial.println("[CMD] Usage: time <unix-seconds>");
+            Serial.println("[CMD] Usage: time <unix-seconds>[.ms]");
         }
     } else if (!strncmp(command, "sos ", 4)) {
         handleSosCommand(command + 4);
     } else if (command[0] != '\0') {
-        Serial.println("[CMD] Commands: silent on | silent off | status | routes | battery | time <unix-seconds> | "
+        Serial.println("[CMD] Commands: silent on | silent off | status | routes | battery | battery cal <volts> | "
+                       "time <unix-seconds>[.ms] | "
                        "sos <k 1-3> [location|]<message>");
     }
 }
@@ -2149,6 +2621,7 @@ void setup() {
     Serial.begin(115200);
     delay(1500);
     detectBatteryControlPolarity();   // before anything drives GPIO37
+    if (BATTERY_SOURCE == BATTERY_SOURCE_LIPO) batteryLoadCalibration();
     linkStateDb.begin(NODE_ID);
     if (BATTERY_SOURCE == BATTERY_SOURCE_ESTIMATE) energyBegin();
 
@@ -2193,14 +2666,20 @@ void setup() {
     Serial.println("  Interfaces & Security Subsystem Initializing...");
     Serial.println("-------------------------------------------------------");
 
-    // Configure Wi-Fi SoftAP with 25-client cap
+    // Configure Wi-Fi SoftAP (phone cap: see MAX_AP_CLIENTS)
     WiFi.mode(WIFI_AP);
     WiFi.softAPConfig(apIP, apIP, netMsk);
-    WiFi.softAP(AP_SSID, NULL, 1, 0, MAX_AP_CLIENTS);
+    const bool apStarted = WiFi.softAP(AP_SSID, NULL, 1, 0, MAX_AP_CLIENTS);
 
-    Serial.printf("[WiFi SoftAP] SSID: '%s'\n", AP_SSID);
+    Serial.printf("[WiFi SoftAP] SSID: '%s'%s\n", AP_SSID, apStarted ? "" : "  ** FAILED TO START **");
     Serial.printf("[WiFi SoftAP] Gateway IP: %s\n", apIP.toString().c_str());
-    Serial.printf("[WiFi SoftAP] Client Connection Cap: %u stations\n", MAX_AP_CLIENTS);
+    wifi_config_t apConfig;
+    if (esp_wifi_get_config(WIFI_IF_AP, &apConfig) == ESP_OK) {
+        Serial.printf("[WiFi SoftAP] Phone cap: %u at once (requested %u, Wi-Fi driver maximum %u)\n",
+                      apConfig.ap.max_connection, AP_CLIENTS_REQUESTED, AP_CLIENTS_DRIVER_MAX);
+    } else {
+        Serial.printf("[WiFi SoftAP] Phone cap: %u at once (requested %u)\n", MAX_AP_CLIENTS, AP_CLIENTS_REQUESTED);
+    }
 
     // Initialize Captive DNS Server
     dnsServer.setErrorReplyCode(DNSReplyCode::NoError);
@@ -2226,8 +2705,20 @@ void setup() {
     if (BATTERY_SOURCE == BATTERY_SOURCE_ESTIMATE) printEnergyReport();
     else if (BATTERY_SOURCE == BATTERY_SOURCE_LIPO) printBatteryReport();
     else Serial.println("[BATTERY] Not measured (USB power bank): heartbeats report battery as unknown.");
+    Serial.printf("[CONFIG] %s: queue %s, DTN %s, relay filter %s%s\n", CONFIG_NAME_CFG,
+                  QUEUE_MODE_CFG == QUEUE_FIFO ? "FIFO" : "min-heap", DTN_ENABLED ? "on" : "off (drop on link failure)",
+                  relayFilterName(), CART_MODEL_AVAILABLE ? " (CART model loaded)" : "");
     Serial.println("[STATUS] Ready for Emergency Message Intake & Security Processing.");
     printCsvHeader();
+    {
+        char detail[64];
+        snprintf(detail, sizeof(detail), "cfg=%s;queue=%s;dtn=%d;filter=%s;cart=%d", CONFIG_NAME_CFG,
+                 QUEUE_MODE_CFG == QUEUE_FIFO ? "fifo" : "heap", DTN_ENABLED ? 1 : 0, relayFilterName(),
+                 CART_MODEL_AVAILABLE);
+        CsvEvent e = csvEvent("CONFIG", 0, 0, 0, 0, 0);
+        e.detail = detail;
+        logCsv(e);
+    }
 }
 
 void loop() {
@@ -2239,6 +2730,7 @@ void loop() {
     applyRadioSilence();
     serviceHeartbeat();
     serviceHeartbeatLabels();
+    serviceBatteryLog();
     serviceRadioIrq();
     serviceRadioRx();
     serviceRadioMac();

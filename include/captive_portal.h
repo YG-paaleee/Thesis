@@ -442,12 +442,14 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
             sendBtn.disabled = true;
             sendBtn.innerText = "ENCRYPTING & TRANSMITTING...";
 
+            var nowMs = Date.now();
             var payload = {
                 credential: cred,
                 priority: selectedPriority,
                 location: loc,
                 message: msg,
-                timestamp: Math.floor(Date.now() / 1000)
+                timestamp: Math.floor(nowMs / 1000),
+                timestamp_ms: nowMs % 1000
             };
 
             fetch('/api/submit', {

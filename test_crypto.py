@@ -8,7 +8,7 @@ Mirrors the firmware (include/packet_codec.h + include/aes_crypto.h):
   ACK frame   = 8-byte prefix + 16-byte frame tag (24 bytes)
   HEARTBEAT   = 21-byte body (incl. own + one relayed link-state row) + 8-byte tag (29 bytes)
   frame tag   = HMAC-SHA-256(mac_key, everything before the tag), truncated
-  body        = ts (uint32 BE) | location length (1 byte) | location | message
+  body        = ts (uint32 BE, Unix s) | ms (uint16 BE, 0-999) | location length (1 byte) | location | message
   location + message <= 200 bytes, so a frame never exceeds the 250-byte LoRa MTU.
 
 Usage:
@@ -55,19 +55,21 @@ def header(k: int, ttl: int, ptype: int) -> int:
     return ((k & 0x03) << 6) | ((ttl & 0x0F) << 2) | (ptype & 0x03)
 
 
-def build_body(ts: int, location: str, message: str) -> bytes:
+def build_body(ts: int, location: str, message: str, ms: int = 0) -> bytes:
     loc, msg = location.encode("utf-8"), message.encode("utf-8")
     if len(loc) > 255 or len(loc) + len(msg) > MAX_TEXT_BYTES:
         raise ValueError(f"location + message is {len(loc) + len(msg)} bytes (max {MAX_TEXT_BYTES})")
-    return struct.pack(">IB", ts, len(loc)) + loc + msg
+    return struct.pack(">IHB", ts, ms, len(loc)) + loc + msg
 
 
 def parse_body(body: bytes):
-    ts, loc_len = struct.unpack(">IB", body[:5])
-    loc = body[5:5 + loc_len]
+    ts, ms, loc_len = struct.unpack(">IHB", body[:7])
+    if ms > 999:
+        raise ValueError("milliseconds out of range")
+    loc = body[7:7 + loc_len]
     if len(loc) != loc_len:
         raise ValueError("location length exceeds body")
-    return ts, loc.decode("utf-8"), body[5 + loc_len:].decode("utf-8")
+    return ts, ms, loc.decode("utf-8"), body[7 + loc_len:].decode("utf-8")
 
 
 def encrypt_body(plain: bytes) -> bytes:
@@ -106,11 +108,11 @@ def decode_relay_path(path):
 
 
 def build_data_frame(k, ttl, ptype, src, next_hop, dst, origin, msg_id, ts, location, message,
-                     mac_retries=0, relays=()):
+                     mac_retries=0, relays=(), ms=0):
     path = relay_path(*relays)
     prefix = bytes([header(k, ttl, ptype), src, next_hop, dst, origin, msg_id >> 8, msg_id & 0xFF,
                     mac_retries, path >> 8, path & 0xFF])
-    unsigned = prefix + encrypt_body(build_body(ts, location, message))
+    unsigned = prefix + encrypt_body(build_body(ts, location, message, ms))
     frame = unsigned + tag(unsigned, FRAME_TAG_SIZE)
     if len(frame) > MAX_LORA_PACKET_SIZE:
         raise ValueError("frame exceeds 250-byte LoRa MTU")
@@ -124,13 +126,13 @@ def decode_data_frame(frame: bytes) -> dict:
     if not hmac.compare_digest(received, tag(unsigned, FRAME_TAG_SIZE)):
         raise ValueError("frame tag mismatch: altered packet or wrong key")
     h = frame[0]
-    ts, location, message = parse_body(decrypt_body(unsigned[FRAME_PREFIX_SIZE:]))
+    ts, ms, location, message = parse_body(decrypt_body(unsigned[FRAME_PREFIX_SIZE:]))
     return {
         "k": h >> 6, "ttl": (h >> 2) & 0x0F, "type": h & 0x03,
         "source": frame[1], "next_hop": frame[2], "destination": frame[3], "origin": frame[4],
         "id": (frame[5] << 8) | frame[6], "mac_retries": frame[7],
         "relays": decode_relay_path((frame[8] << 8) | frame[9]),
-        "ts": ts, "location": location, "message": message, "frame_bytes": len(frame),
+        "ts": ts, "ms": ms, "location": location, "message": message, "frame_bytes": len(frame),
     }
 
 
@@ -176,8 +178,10 @@ def self_test():
 
     sample = build_data_frame(1, 15, TYPE_SOS, 6, 5, 1, 6, 1044, 1791796202,
                               "Purok 4, Coastline",
-                              "Elderly resident with acute respiratory distress. Water level rising fast.")
+                              "Elderly resident with acute respiratory distress. Water level rising fast.",
+                              ms=437)
     d = decode_data_frame(sample)
+    assert d["ts"] == 1791796202 and d["ms"] == 437
     print(f"[4] Typical SOS                 -> {len(sample)} bytes, ToA {time_on_air_s(len(sample)):.2f} s; "
           f"decoded V{d['origin']}#{d['id']}: {d['message'][:30]}...")
 
