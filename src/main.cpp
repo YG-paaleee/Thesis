@@ -269,7 +269,6 @@ struct NeighborInfo {
     float snr;
     uint16_t batteryPermille;   // 0.1 % units, BATTERY_UNKNOWN if not reported
     uint8_t trafficLoad;
-    uint8_t queueOccupancy;
     uint16_t lastSequence;
     uint32_t lastHeardMs;
     uint8_t missesLogged;       // HB_MISS rows already written by timeout since lastHeardMs
@@ -281,7 +280,7 @@ NeighborInfo neighborTable[NETWORK_NODE_COUNT] = {};
 // Every heartbeat a neighbour is expected to send becomes one labelled row:
 //   HB_OK   it arrived      HB_MISS   it did not (sequence gap or long silence)
 // Features are the values this node held BEFORE that heartbeat was due (last
-// heartbeat's RSSI/SNR, the neighbour's traffic/queue, and the heartbeat age at
+// heartbeat's RSSI/SNR, the neighbour's traffic, and the heartbeat age at
 // the moment it should have arrived = j x interval), the same features a data
 // TX row carries. Using the age measured on arrival would leak the label.
 constexpr uint8_t HB_LABEL_MAX_GAP = 64;          // larger jump = neighbour rebooted: resync, no label
@@ -304,7 +303,7 @@ void resetMacBackoff();
 // Machine-readable event log. Every row starts with "CSV," and has the same
 // columns, so the PC can keep only those lines and load them straight into pandas:
 // CSV,ms,node,event,origin,id,k,type,peer,rssi,snr,peer_batt_pct,peer_traffic,
-//     peer_queue,peer_hb_age_ms,self_batt_pct,self_used_mah,mac_retries,bytes,queue_len,dtn_len,
+//     peer_queue (reserved/blank),peer_hb_age_ms,self_batt_pct,self_used_mah,mac_retries,bytes,queue_len,dtn_len,
 //     ahead,bypassed,cart_pf,cart_class,heur_class,wait_ms,queue_index,d_buffer_ms,detail
 //   ms      this node's uptime (millis)       node   node that wrote the row
 //   event   NEW | TX | RX | ACK | NOACK | DELIVER | DUP | STORE | EVICT | DROP | LINK |
@@ -320,7 +319,8 @@ void resetMacBackoff();
 //   origin,id  message key (heartbeats: source node + heartbeat sequence)
 //   peer    the other end of the radio link: previous hop for RX, next hop for TX/ACK/NOACK
 //   rssi,snr   RX rows: measured on this frame. Other rows: last frame heard from peer
-//   peer_*  latest heartbeat telemetry of peer (battery mV, traffic, queue, age in ms)
+//   peer_*  latest heartbeat telemetry of peer (battery mV, traffic, age in ms);
+//           peer_queue remains blank for compatibility with existing CSV files
 //   peer_batt_pct  peer's battery level (%) from its heartbeat (estimated on power banks)
 //   self_batt_pct,self_used_mah  this node's own battery % and energy used so far
 //           (heartbeat TX rows, every ~30 s; energy-consumption metric)
@@ -969,7 +969,7 @@ void logCsv(const CsvEvent &e) {
     if (neighbor) {
         if (neighbor->batteryPermille != BATTERY_UNKNOWN) append("%.1f,", neighbor->batteryPermille / 10.0f);
         else append(",");
-        append("%u,%u,%lu,", neighbor->trafficLoad, neighbor->queueOccupancy,
+        append("%u,,%lu,", neighbor->trafficLoad,
                (unsigned long)(e.hasPeerAge ? e.peerAgeMs : now - neighbor->lastHeardMs));
     } else {
         append(",,,,");
@@ -1046,7 +1046,6 @@ void transmitHeartbeat(uint32_t now) {
 
     // 0 mV = no valid LiPo reading (e.g. powered from a USB power bank only).
     const uint16_t batteryPermille = currentBatteryPermille();
-    const size_t occupancy = queueSize() + dtnBuffer.size();
 
     int16_t cadState = radio.scanChannel();
     radioIrqPending = false;   // consume the CAD_DONE interrupt (see serviceRadioMac)
@@ -1067,8 +1066,7 @@ void transmitHeartbeat(uint32_t now) {
             relayedSequence = relayed.sequence;
             packLinkRow(relayedOwner, relayed.weight, relayedWire);
         }
-        buildHeartbeatBody(NODE_ID, sequence, batteryPermille, dataBackoffsSinceHeartbeat,
-                           occupancy > 255 ? 255 : (uint8_t)occupancy, ownWire,
+        buildHeartbeatBody(NODE_ID, sequence, batteryPermille, dataBackoffsSinceHeartbeat, ownWire,
                            relayedOwner, relayedSequence, relayedOwner ? relayedWire : nullptr,
                            heartbeatPacket);
         if (!AESCrypto::authenticateFrame(heartbeatPacket, HEARTBEAT_BODY_SIZE,
@@ -1084,9 +1082,9 @@ void transmitHeartbeat(uint32_t now) {
             radioTxIsHeartbeat = true;
             markRadioTx(true);
             char battery[12];
-            Serial.printf("[HB TX] V%u seq=%u batt=%s traffic=%u queue=%u row=[%u,%u,%u,%u,%u] relay=V%u (%u bytes)\n",
+            Serial.printf("[HB TX] V%u seq=%u batt=%s traffic=%u row=[%u,%u,%u,%u,%u] relay=V%u (%u bytes)\n",
                           NODE_ID, sequence, batteryText(batteryPermille, battery, sizeof(battery)),
-                          dataBackoffsSinceHeartbeat, (unsigned int)occupancy,
+                          dataBackoffsSinceHeartbeat,
                           ownWire[0], ownWire[1], ownWire[2], ownWire[3], ownWire[4], relayedOwner,
                           (unsigned int)HEARTBEAT_PACKET_SIZE);
             CsvEvent e = csvEvent("TX", NODE_ID, sequence, 0, PACKET_TYPE_HEARTBEAT, BROADCAST_NODE_ID);
@@ -1250,17 +1248,16 @@ void handleHeartbeat(const uint8_t *packet, size_t packetLen, float rssi, float 
     neighbor.snr = snr;
     neighbor.batteryPermille = heartbeat.batteryPermille;
     neighbor.trafficLoad = heartbeat.trafficLoad;
-    neighbor.queueOccupancy = heartbeat.queueOccupancy;
     neighbor.lastSequence = heartbeat.sequence;
     neighbor.lastHeardMs = millis();
     neighbor.missesLogged = 0;
     neighbor.labelResync = false;
 
     char battery[12];
-    Serial.printf("[HB RX] V%u seq=%u rssi=%.1f snr=%.1f batt=%s traffic=%u queue=%u\n",
+    Serial.printf("[HB RX] V%u seq=%u rssi=%.1f snr=%.1f batt=%s traffic=%u\n",
                   heartbeat.sourceNode, heartbeat.sequence, rssi, snr,
                   batteryText(heartbeat.batteryPermille, battery, sizeof(battery)),
-                  heartbeat.trafficLoad, heartbeat.queueOccupancy);
+                  heartbeat.trafficLoad);
     CsvEvent e = csvEvent("RX", heartbeat.sourceNode, heartbeat.sequence, 0,
                           PACKET_TYPE_HEARTBEAT, heartbeat.sourceNode);
     e.hasRadio = true;
@@ -2270,53 +2267,63 @@ void collectSubmitBody(AsyncWebServerRequest *request, uint8_t *data, size_t len
     if (index + len > body->received) body->received = index + len;
 }
 
+bool requireDashboardAuthentication(AsyncWebServerRequest *request) {
+    if (request->authenticate(ADMIN_DASHBOARD_USERNAME, ADMIN_DASHBOARD_PASSWORD)) return true;
+    request->requestAuthentication("Emergency Hub Admin");
+    return false;
+}
+
 void setupWebServerRoutes() {
     // 1. Captive Portal UI (Root)
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
         request->send_P(200, "text/html", CAPTIVE_PORTAL_HTML);
     });
 
-    // 2. Admin / Main Hub Dashboard (Stationary Hub V1 at Barangay Hall)
-    server.on("/admin", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send_P(200, "text/html", ADMIN_DASHBOARD_HTML);
-    });
+    // Register dashboard routes only on the stationary Main Hub V1.
+    if (NODE_ID == HUB_NODE_ID) {
+        server.on("/admin", HTTP_GET, [](AsyncWebServerRequest *request) {
+            if (!requireDashboardAuthentication(request)) return;
+            request->send_P(200, "text/html", ADMIN_DASHBOARD_HTML);
+        });
 
-    server.on("/api/live_incidents", HTTP_GET, [](AsyncWebServerRequest *request) {
-        if (!liveIncidentMutex ||
-            xSemaphoreTake(liveIncidentMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
-            request->send(503, "application/json", "{\"error\":\"Incident buffer busy\"}");
-            return;
-        }
+        server.on("/api/live_incidents", HTTP_GET, [](AsyncWebServerRequest *request) {
+            if (!requireDashboardAuthentication(request)) return;
+            if (!liveIncidentMutex ||
+                xSemaphoreTake(liveIncidentMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
+                request->send(503, "application/json", "{\"error\":\"Incident buffer busy\"}");
+                return;
+            }
 
-        JsonDocument document;
-        JsonArray incidents = document.to<JsonArray>();
-        const size_t oldestIndex = (liveIncidentWriteIndex + LIVE_INCIDENT_CAPACITY -
-                                    liveIncidentCount) % LIVE_INCIDENT_CAPACITY;
-        for (size_t i = 0; i < liveIncidentCount; i++) {
-            const LiveIncident &incident = liveIncidents[(oldestIndex + i) % LIVE_INCIDENT_CAPACITY];
-            JsonObject row = incidents.add<JsonObject>();
-            row["id"] = incident.messageId;
-            row["priority"] = incident.priority;
-            row["packetType"] = incident.packetType;
-            row["originNode"] = incident.originNode;
-            char originLabel[5];
-            snprintf(originLabel, sizeof(originLabel), "V%u", incident.originNode);
-            row["origin"] = originLabel;
-            row["route"] = incident.path;
-            if (incident.latencyMs >= 0) row["latencyMs"] = incident.latencyMs;
-            else row["latencyMs"] = nullptr;
-            row["location"] = incident.location;
-            row["message"] = incident.message;
-            row["crypto"] = "AES-128-CBC + HMAC-SHA-256/128";
-            row["rxTime"] = incident.receivedAtMs;
-            row["arrival"] = incident.arrivalNo;
-        }
-        xSemaphoreGive(liveIncidentMutex);
+            JsonDocument document;
+            JsonArray incidents = document.to<JsonArray>();
+            const size_t oldestIndex = (liveIncidentWriteIndex + LIVE_INCIDENT_CAPACITY -
+                                        liveIncidentCount) % LIVE_INCIDENT_CAPACITY;
+            for (size_t i = 0; i < liveIncidentCount; i++) {
+                const LiveIncident &incident = liveIncidents[(oldestIndex + i) % LIVE_INCIDENT_CAPACITY];
+                JsonObject row = incidents.add<JsonObject>();
+                row["id"] = incident.messageId;
+                row["priority"] = incident.priority;
+                row["packetType"] = incident.packetType;
+                row["originNode"] = incident.originNode;
+                char originLabel[5];
+                snprintf(originLabel, sizeof(originLabel), "V%u", incident.originNode);
+                row["origin"] = originLabel;
+                row["route"] = incident.path;
+                if (incident.latencyMs >= 0) row["latencyMs"] = incident.latencyMs;
+                else row["latencyMs"] = nullptr;
+                row["location"] = incident.location;
+                row["message"] = incident.message;
+                row["crypto"] = "AES-128-CBC + HMAC-SHA-256/128";
+                row["rxTime"] = incident.receivedAtMs;
+                row["arrival"] = incident.arrivalNo;
+            }
+            xSemaphoreGive(liveIncidentMutex);
 
-        AsyncResponseStream *response = request->beginResponseStream("application/json");
-        serializeJson(document, *response);
-        request->send(response);
-    });
+            AsyncResponseStream *response = request->beginResponseStream("application/json");
+            serializeJson(document, *response);
+            request->send(response);
+        });
+    }
 
     // Android, Windows, and Chrome captive portal probes
     server.on("/generate_204", HTTP_GET, [](AsyncWebServerRequest *request) { request->redirect("/"); });
@@ -2434,10 +2441,10 @@ void printNodeStatus() {
                       link.consecutiveAckFailures);
         if (neighbor.valid) {
             char battery[12];
-            Serial.printf(" lastHB=%lus ago rssi=%.1f snr=%.1f batt=%s traffic=%u queue=%u",
+            Serial.printf(" lastHB=%lus ago rssi=%.1f snr=%.1f batt=%s traffic=%u",
                           (unsigned long)((now - neighbor.lastHeardMs) / 1000), neighbor.rssi,
                           neighbor.snr, batteryText(neighbor.batteryPermille, battery, sizeof(battery)),
-                          neighbor.trafficLoad, neighbor.queueOccupancy);
+                          neighbor.trafficLoad);
         }
         Serial.println();
     }

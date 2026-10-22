@@ -26,7 +26,7 @@
 //   [2..3]   heartbeat sequence number (big-endian)
 //   [4..5]   battery level in 0.1 % units, 0-1000 (big-endian); 0xFFFF = unknown
 //   [6]      traffic load: data-transmission backoffs (TBEB) since the previous heartbeat (saturates at 255)
-//   [7]      local queue occupancy (priority queue + DTN buffer, saturates at 255)
+//   [7]      reserved; transmitted as 0 (queue occupancy is not broadcast)
 //   --- Link-State Update (Section 3.1) ---
 //   [8..12]  sender's OWN one-hop row: edge weight to every other node, in node-ID
 //            order skipping the sender (1..254 = cost, 255 = no edge)
@@ -159,8 +159,7 @@ inline bool parseMessageBody(const uint8_t *in, size_t len, uint32_t &timestamp,
 // Heartbeat body (bytes [0..20]); the caller appends the 8-byte tag.
 // ownRowWire / relayedRowWire: LS_ROW_WIRE_SIZE bytes each (see link_state.h).
 inline void buildHeartbeatBody(uint8_t sourceNode, uint16_t sequence, uint16_t batteryPermille,
-                               uint8_t trafficLoad, uint8_t queueOccupancy,
-                               const uint8_t *ownRowWire, uint8_t relayedOwner,
+                               uint8_t trafficLoad, const uint8_t *ownRowWire, uint8_t relayedOwner,
                                uint16_t relayedSequence, const uint8_t *relayedRowWire,
                                uint8_t *out) {
     out[0] = encodeHeader(0, 0, PACKET_TYPE_HEARTBEAT);
@@ -170,7 +169,7 @@ inline void buildHeartbeatBody(uint8_t sourceNode, uint16_t sequence, uint16_t b
     out[4] = (uint8_t)(batteryPermille >> 8);
     out[5] = (uint8_t)(batteryPermille);
     out[6] = trafficLoad;
-    out[7] = queueOccupancy;
+    out[7] = 0; // reserved for compatibility; do not disclose local queue state
     memcpy(out + 8, ownRowWire, LS_ROW_WIRE_SIZE);
     out[13] = relayedOwner;
     out[14] = (uint8_t)(relayedSequence >> 8);
@@ -184,7 +183,6 @@ struct HeartbeatInfo {
     uint16_t sequence;
     uint16_t batteryPermille;   // 0.1 % units; BATTERY_UNKNOWN if not available
     uint8_t trafficLoad;
-    uint8_t queueOccupancy;
     uint8_t ownRowWire[LS_ROW_WIRE_SIZE];
     uint8_t relayedOwner;       // 0 = no relayed row
     uint16_t relayedSequence;
@@ -198,7 +196,6 @@ inline bool parseHeartbeatBody(const uint8_t *in, size_t len, HeartbeatInfo &inf
     info.sequence = ((uint16_t)in[2] << 8) | in[3];
     info.batteryPermille = ((uint16_t)in[4] << 8) | in[5];
     info.trafficLoad = in[6];
-    info.queueOccupancy = in[7];
     memcpy(info.ownRowWire, in + 8, LS_ROW_WIRE_SIZE);
     info.relayedOwner = in[13];
     info.relayedSequence = ((uint16_t)in[14] << 8) | in[15];

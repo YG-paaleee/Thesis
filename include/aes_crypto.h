@@ -5,23 +5,12 @@
 #include "mbedtls/aes.h"
 #include "mbedtls/md.h"
 #include "esp_system.h"
-
-// 128-bit Pre-Shared Key (PSK) - 16 bytes for AES-128 (Thesis Section 4.3).
-// Randomly generated for this project (replaces the public FIPS-197 example
-// key). Every node and test_crypto.py must use the same key; changing it
-// means re-flashing all six boards.
-static const uint8_t PRE_SHARED_KEY[16] = {
-    0x8F, 0x71, 0x47, 0x05, 0x12, 0x6A, 0xB1, 0x42,
-    0x65, 0xDE, 0xAF, 0xB8, 0x40, 0x31, 0x77, 0xA4
-};
+#include "private_config.h"
 
 // HMAC key is derived with a fixed label so it is separate from the AES key.
 static const char MAC_KEY_LABEL[] = "SanMiguel LoRa CBC MAC v1";
 static const size_t HMAC_SIZE = 32; // full SHA-256 output; frame tags use a truncated prefix
 static const size_t MAX_ENCRYPTED_PACKET_SIZE = 250; // Thesis LoRa MTU limit
-
-// Community Access Credential (Single Shared Secret for Barangay San Miguel)
-#define COMMUNITY_ACCESS_CREDENTIAL "SANMIGUEL2026"
 
 class AESCrypto {
 private:

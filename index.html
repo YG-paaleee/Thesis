@@ -282,8 +282,8 @@
             <!-- Community Credential Verification (Anti-Spoofing / Chapter 4.3) -->
             <div class="auth-box">
                 <div class="auth-label">&#128274; Community Passcode / Access Token</div>
-                <input type="text" id="credential" placeholder="Enter barangay passcode (e.g. SANMIGUEL2026)" value="SANMIGUEL2026" autocomplete="off" required>
-                <div class="auth-hint">Reduces network abuse. Default: <b>SANMIGUEL2026</b></div>
+                <input type="text" id="credential" placeholder="Enter barangay passcode" autocomplete="off" required>
+                <div class="auth-hint">Enter the community passcode provided by your barangay.</div>
             </div>
 
             <!-- Section 1: Priority Selection (Dual-Key Min-Heap k=1,2,3) -->
@@ -404,7 +404,6 @@
 
         function clearForm() {
             document.getElementById('emergencyForm').reset();
-            document.getElementById('credential').value = "SANMIGUEL2026";
             selectPriority(1);
             updateByteCount();
             document.getElementById('statusBox').style.display = 'none';
@@ -426,10 +425,6 @@
             var loc = document.getElementById('location').value.trim();
             var msg = document.getElementById('message').value.trim();
 
-            if (cred !== "SANMIGUEL2026") {
-                showStatus('&#10007; <b>Invalid Community Passcode:</b> Please use the designated barangay passcode (SANMIGUEL2026).', false);
-                return;
-            }
             if (!loc || !msg) return;
 
             sendBtn.disabled = true;

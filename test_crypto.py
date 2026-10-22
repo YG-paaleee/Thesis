@@ -19,17 +19,28 @@ Usage:
 import hashlib
 import hmac
 import os
+from pathlib import Path
+import re
 import struct
 import sys
 
 from cryptography.hazmat.primitives import padding
 from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 
-# 128-bit Pre-Shared Key (PSK) - must match include/aes_crypto.h
-PRE_SHARED_KEY = bytes([
-    0x8F, 0x71, 0x47, 0x05, 0x12, 0x6A, 0xB1, 0x42,
-    0x65, 0xDE, 0xAF, 0xB8, 0x40, 0x31, 0x77, 0xA4
-])
+# Read the same local-only key used by the firmware so no copy stays in the repo.
+def load_pre_shared_key() -> bytes:
+    config = Path(__file__).resolve().parent / "include" / "private_config.h"
+    if not config.exists():
+        raise RuntimeError("Missing include/private_config.h; copy private_config.example.h and add local secrets.")
+    source = config.read_text(encoding="utf-8")
+    match = re.search(r"PRE_SHARED_KEY\s*\[\s*16\s*\]\s*=\s*\{([^}]*)\}", source, re.S)
+    values = re.findall(r"0x([0-9A-Fa-f]{2})", match.group(1)) if match else []
+    if len(values) != 16:
+        raise RuntimeError("PRE_SHARED_KEY in include/private_config.h must contain exactly 16 hex bytes.")
+    return bytes(int(value, 16) for value in values)
+
+
+PRE_SHARED_KEY = load_pre_shared_key()
 MAC_KEY_LABEL = b"SanMiguel LoRa CBC MAC v1"
 
 MAX_LORA_PACKET_SIZE = 250
@@ -140,10 +151,10 @@ def decode_relay_path_of(frame):
     return decode_relay_path((frame[8] << 8) | frame[9])
 
 
-def build_heartbeat(src, seq, battery_permille, traffic, queue, own_row=(255,) * 5,
+def build_heartbeat(src, seq, battery_permille, traffic, own_row=(255,) * 5,
                     relayed_owner=0, relayed_seq=0, relayed_row=(255,) * 5):
-    """battery_permille: 0.1 % units (0xFFFF = unknown). Rows: 5 weights (255 = no edge)."""
-    body = (bytes([header(0, 0, TYPE_HEARTBEAT), src]) + struct.pack(">HHBB", seq, battery_permille, traffic, queue)
+    """Byte 7 is reserved zero; rows contain 5 weights (255 = no edge)."""
+    body = (bytes([header(0, 0, TYPE_HEARTBEAT), src]) + struct.pack(">HHBB", seq, battery_permille, traffic, 0)
             + bytes(own_row) + bytes([relayed_owner]) + struct.pack(">H", relayed_seq) + bytes(relayed_row))
     return body + tag(body, HEARTBEAT_TAG_SIZE)
 
@@ -193,11 +204,11 @@ def self_test():
     except ValueError:
         print("[5] Tampered frame              -> rejected by frame tag")
 
-    hb = build_heartbeat(5, 77, 0xFFFF, 4, 2, own_row=(255, 6, 12, 255, 2), relayed_owner=3, relayed_seq=40,
+    hb = build_heartbeat(5, 77, 0xFFFF, 4, own_row=(255, 6, 12, 255, 2), relayed_owner=3, relayed_seq=40,
                          relayed_row=(4, 255, 255, 12, 15))
     print(f"[6] Heartbeat                   -> {len(hb)} bytes, ToA {time_on_air_s(len(hb)):.2f} s")
     print(f"[7] ACK                         -> 24 bytes, ToA {time_on_air_s(24):.2f} s")
-    assert len(hb) == 29
+    assert len(hb) == 29 and hb[7] == 0
 
     print("\n[+] SUCCESS: binary frames, AES-128-CBC and HMAC-SHA-256 frame tags verified.")
     print("=" * 65)
