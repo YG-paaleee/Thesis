@@ -3,20 +3,20 @@
 Capture the machine-readable event log from one or more LoRa nodes over USB.
 
 Every node prints rows that start with "CSV," (see logCsv() in src/main.cpp).
-This script keeps ONLY those rows, ignores the human-readable debug lines, and
-stamps each row with the PC's clock. With all nodes plugged into the same PC
-(Phase 2 bench / stress tests) that PC timestamp is one shared clock, so
-end-to-end latency = pc_epoch_ms(DELIVER at V1) - pc_epoch_ms(NEW at origin).
+This script saves those rows to CSV and all human-readable lines to a raw file.
+Each row has a PC receipt timestamp, which includes USB/processing delay and
+must not be assumed equal to node event time. Separate laptops need a measured
+shared reference. --clock-probe-every saves USB clock comparison evidence for review.
 
-On connect it also sends "time <unix-seconds>" to each node, so the node clocks
-(and the hub dashboard's latency column) are set too.
+Unless disabled, it sends "time <unix-seconds>" on connection. That sets node
+wall clocks but does not verify their accuracy or the phone's payload timestamp.
 
 Usage (Windows examples):
   python tools/capture_telemetry.py COM3
   python tools/capture_telemetry.py COM3 COM5 COM7 --out run01.csv
-  python tools/capture_telemetry.py COM3 COM5 --target 300      # stop after 300 CART labels
+  python tools/capture_telemetry.py COM3 COM5 --target 300      # stop after 300 diagnostic outcomes, not verified labels
 
-  CART training data (passive: the node labels every heartbeat it expects from its neighbours):
+  Recording (final data-packet training requires paired endpoints and reconciled outcomes):
   python tools/capture_telemetry.py COM8 --session F1-V1-normal --out F1-V1-normal.csv
 
   Final evaluation (laptop sends a test message from the node every 30 s):
@@ -35,6 +35,7 @@ Outputs:
   <out>.csv        pc_epoch_ms,port,session,<node CSV columns...>
                    (data TX rows carry cart_pf, cart_class and heur_class: both relay-filter verdicts)   (load with pandas)
   <out>_raw.log    every line from every port, for debugging
+  <out>_clock.jsonl capture identity and optional USB timing probe evidence
 
 Requires: pip install pyserial
 """
@@ -43,6 +44,9 @@ import argparse
 import sys
 import threading
 import time
+import json
+import socket
+import uuid
 from pathlib import Path
 
 try:
@@ -60,9 +64,15 @@ FAIL_EVENTS = {"NOACK", "HB_MISS"}
 
 
 class Capture:
-    def __init__(self, out_csv: Path, target: int, session: str):
+    def __init__(self, out_csv: Path, target: int, session: str, expected_node=None, expected_config=None):
         self.out_csv = out_csv
         self.raw_log = out_csv.with_name(out_csv.stem + "_raw.log")
+        self.clock_log = out_csv.with_name(out_csv.stem + '_clock.jsonl')
+        self.capture_id = uuid.uuid4().hex
+        self.pending_probes = {}
+        self.expected_node = expected_node
+        self.expected_config = expected_config
+        self.error_reason = None
         self.target = target
         self.session = session.replace(",", "_")
         self.lock = threading.Lock()
@@ -71,14 +81,24 @@ class Capture:
         self.failed = 0
         self.header_columns = NODE_HEADER.count(",") + 1
         self.stop = threading.Event()
-        self.csv_file = open(self.out_csv, "w", encoding="utf-8", newline="")
-        self.raw_file = open(self.raw_log, "w", encoding="utf-8", newline="")
+        for path in (self.out_csv, self.raw_log, self.clock_log):
+            if path.exists():
+                raise FileExistsError(f'Recording already exists: {path}. Choose a new output filename.')
+        self.csv_file = open(self.out_csv, "x", encoding="utf-8", newline="")
+        self.raw_file = open(self.raw_log, "x", encoding="utf-8", newline="")
+        self.clock_file = open(self.clock_log, 'x', encoding='utf-8')
+        self.clock_file.write(json.dumps(dict(event='CAPTURE', capture_id=self.capture_id,
+            host=socket.gethostname(), session=self.session, csv=str(out_csv.resolve()))) + '\n')
+        self.clock_file.flush()
         self.csv_file.write("pc_epoch_ms,port,session," + NODE_HEADER + "\n")
 
     def handle_line(self, port: str, line: str) -> None:
-        pc_ms = int(time.time() * 1000)
+        receive_mono_ms = time.monotonic_ns() / 1_000_000
+        receive_epoch_ms = time.time_ns() / 1_000_000
+        pc_ms = int(receive_epoch_ms)
         with self.lock:
             self.raw_file.write(f"{pc_ms} {port} {line}\n")
+            self.raw_file.flush()
             if not line.startswith(CSV_PREFIX):
                 return                                   # debug line: never counted as data
             body = line[len(CSV_PREFIX):]
@@ -88,10 +108,35 @@ class Capture:
                           "Update NODE_HEADER or re-flash.", file=sys.stderr)
                 return                                   # header printed at node boot
             if body.count(",") + 1 != self.header_columns:
+                print(f'\n[{port}] WARNING: malformed CSV row retained in raw log; review this recording interval.', file=sys.stderr)
                 return                                   # incomplete row (e.g. cut by a reset)
             self.csv_file.write(f"{pc_ms},{port},{self.session},{body}\n")
+            self.csv_file.flush()
             self.rows += 1
             fields = body.split(",")
+            if self.expected_node is not None and fields[1] != str(self.expected_node):
+                self.error_reason = f'Wrong board: expected V{self.expected_node}, recorded node {fields[1]}.'
+                print(f'\nERROR: {self.error_reason}', file=sys.stderr)
+                self.stop.set()
+            if fields[2] == 'CONFIG':
+                config_meta = dict(item.split('=', 1) for item in fields[-1].split(';') if '=' in item)
+                actual_config = config_meta.get('cfg', 'unknown')
+                if self.expected_config and actual_config != self.expected_config:
+                    self.error_reason = f'Wrong firmware configuration: expected {self.expected_config}, recorded {actual_config}.'
+                    print(f'\nERROR: {self.error_reason}', file=sys.stderr)
+                    self.stop.set()
+                else:
+                    print(f'\nVerified boot record: V{fields[1]}, configuration {actual_config}.', flush=True)
+            if fields[2] == 'CLOCK':
+                meta = dict(item.split('=', 1) for item in fields[-1].split(';') if '=' in item)
+                sent = self.pending_probes.pop((port, meta.get('probe')), None)
+                if sent is not None:
+                    self.clock_file.write(json.dumps(dict(event='PROBE_REPLY', port=port,
+                        probe=meta.get('probe'), node=int(fields[1]), local_ms=int(fields[0]),
+                        boot=meta.get('boot'), seq=meta.get('seq'),
+                        receive_epoch_ms=receive_epoch_ms, receive_mono_ms=receive_mono_ms,
+                        **sent)) + '\n')
+                    self.clock_file.flush()
             if fields[2] in LABEL_EVENTS:
                 self.labelled += 1
                 if fields[2] in FAIL_EVENTS:
@@ -100,16 +145,34 @@ class Capture:
                 self.csv_file.flush()
                 self.raw_file.flush()
             share = f"{100 * self.failed / self.labelled:.0f}%" if self.labelled else "-"
-            print(f"\rrows: {self.rows}   CART labels: {self.labelled}"
+            print(f"\rrows: {self.rows}   diagnostic outcomes (not verified training labels): {self.labelled}"
                   + (f"/{self.target}" if self.target else "")
                   + f"   failures (HB_MISS/NOACK): {self.failed} ({share})   ", end="", flush=True)
             if self.target and self.labelled >= self.target:
                 self.stop.set()
 
+    def probe_clock(self, port_name, port) -> None:
+        token = uuid.uuid4().hex[:16]
+        with self.lock:
+            # Bound memory if an old firmware does not implement CLOCK.
+            now_mono = time.monotonic_ns() / 1_000_000
+            self.pending_probes = {key: value for key, value in self.pending_probes.items()
+                                   if now_mono - value['send_mono_ms'] < 120_000}
+            sent = dict(send_epoch_ms=time.time_ns() / 1_000_000,
+                        send_mono_ms=time.monotonic_ns() / 1_000_000)
+            self.pending_probes[(port_name, token)] = sent
+            self.clock_file.write(json.dumps(dict(event='PROBE_SEND', port=port_name, probe=token, **sent)) + '\n')
+            self.clock_file.flush()
+        port.write(f'clock {token}\n'.encode('ascii'))
+
     def close(self) -> None:
         with self.lock:
             self.csv_file.close()
             self.raw_file.close()
+            self.clock_file.write(json.dumps(dict(event='CAPTURE_END',
+                epoch_ms=time.time_ns() / 1_000_000, pending_probes=len(self.pending_probes),
+                recording_error=self.error_reason)) + '\n')
+            self.clock_file.close()
 
 
 def open_port(name: str) -> serial.Serial:
@@ -186,11 +249,12 @@ class Injector:
         return f"sos {k} {self.location}|CART test {port_name} #{self.count}\n".encode()
 
 
-def reader(name: str, capture: Capture, sync_clock: bool, injector=None) -> None:
+def reader(name: str, capture: Capture, sync_clock: bool, injector=None, clock_probe_every=0) -> None:
     try:
         port = open_port(name)
     except serial.SerialException as error:
         print(f"\n[{name}] could not open: {error}", file=sys.stderr)
+        capture.error_reason = f'{name}: could not open serial connection'
         return
     if isinstance(injector, TierInjector):
         print(f"[{name}] connected, {injector.description}")
@@ -199,12 +263,16 @@ def reader(name: str, capture: Capture, sync_clock: bool, injector=None) -> None
     if sync_clock:
         port.write(f"time {time.time():.3f}\n".encode())     # Unix seconds with milliseconds
     buffer = b""
+    next_clock_probe = time.monotonic()
     try:
         while not capture.stop.is_set():
+            if clock_probe_every and time.monotonic() >= next_clock_probe:
+                capture.probe_clock(name, port)
+                next_clock_probe = time.monotonic() + clock_probe_every
             if injector and injector.due():
                 port.write(injector.command(name))
             # Read whatever has arrived right away (blocks at most 0.5 s only when idle),
-            # so each row is stamped within a few ms of reaching the PC.
+            # PC timestamps describe receipt here; no fixed latency bound is assumed.
             chunk = port.read(port.in_waiting or 1)
             if not chunk:
                 continue
@@ -216,6 +284,8 @@ def reader(name: str, capture: Capture, sync_clock: bool, injector=None) -> None
                     capture.handle_line(name, line)
     except serial.SerialException as error:
         print(f"\n[{name}] disconnected: {error}", file=sys.stderr)
+        capture.error_reason = f'{name}: serial connection interrupted'
+        capture.stop.set()
     finally:
         port.close()
 
@@ -225,8 +295,12 @@ def main() -> None:
     parser.add_argument("ports", nargs="+", help="serial ports, e.g. COM3 COM5 (Windows) or /dev/ttyUSB0")
     parser.add_argument("--out", default="empirical_telemetry_dataset.csv", help="output CSV file")
     parser.add_argument("--target", type=int, default=0,
-                        help="stop after this many CART labels (HB_OK/HB_MISS/ACK/NOACK rows); 0 = until Ctrl+C")
+                        help="stop after this many diagnostic HB_OK/HB_MISS/ACK/NOACK rows, not verified training labels; 0 = until Ctrl+C")
     parser.add_argument("--no-time-sync", action="store_true", help="do not send the 'time' command to nodes")
+    parser.add_argument('--clock-probe-every', type=float, default=0,
+                        help='USB timing probe interval in seconds; 0 disables probes. Saves a separate clock JSONL file; does not prove cross-laptop synchronisation.')
+    parser.add_argument('--expected-node', type=int, choices=range(1, 7), help='Stop if the single attached port reports a different node ID')
+    parser.add_argument('--expected-config', help='Stop if a boot CONFIG differs from this value; capture before resetting the node')
     parser.add_argument("--session", default="",
                         help="label written on every row, e.g. A-V6-200m (default: output file name). "
                              "Used to split training/test data by session.")
@@ -246,6 +320,10 @@ def main() -> None:
     parser.add_argument("--stop-after", type=float, default=0.0,
                         help="tier: stop recording this many seconds after the last command (0 = Ctrl+C)")
     args = parser.parse_args()
+    if not (args.clock_probe_every == 0 or 1 <= args.clock_probe_every < float('inf')):
+        parser.error('--clock-probe-every must be zero or a finite interval of at least one second')
+    if args.expected_node is not None and len(args.ports) != 1:
+        parser.error('--expected-node requires exactly one serial port')
 
     unknown = [p for p in args.inject if p not in args.ports]
     if unknown:
@@ -262,7 +340,7 @@ def main() -> None:
     if args.tier and not args.inject:
         sys.exit("--tier needs --inject PORT (the node(s) that send the batch)")
     session = args.session or (f"{args.tier}-run{args.run:02d}" if args.tier else Path(args.out).stem)
-    capture = Capture(Path(args.out), args.target, session)
+    capture = Capture(Path(args.out), args.target, session, args.expected_node, args.expected_config)
     stagger = args.every / max(len(args.inject), 1)
 
     def make_injector(port):
@@ -273,7 +351,7 @@ def main() -> None:
         return Injector(args.every, priorities, session, stagger * args.inject.index(port))
 
     injectors = {p: make_injector(p) for p in args.ports}
-    threads = [threading.Thread(target=reader, args=(p, capture, not args.no_time_sync, injectors[p]), daemon=True)
+    threads = [threading.Thread(target=reader, args=(p, capture, not args.no_time_sync, injectors[p], args.clock_probe_every), daemon=True)
                for p in args.ports]
     stop_at = None
     if args.tier and args.stop_after > 0:
@@ -293,8 +371,10 @@ def main() -> None:
     for thread in threads:
         thread.join(timeout=2)
     capture.close()
-    print(f"\nSaved {capture.rows} rows ({capture.labelled} CART labels, {capture.failed} failures) "
+    print(f"\nSaved {capture.rows} rows ({capture.labelled} diagnostic outcomes, {capture.failed} diagnostic failures) "
           f"to {capture.out_csv}")
+    if capture.error_reason:
+        sys.exit(f'Recording needs review: {capture.error_reason}')
 
 
 if __name__ == "__main__":

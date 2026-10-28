@@ -3,7 +3,9 @@
 Train the CART relay classifier and export it to the firmware (paper 4.4.2, 4.6 Steps 1.3 and 2.1).
 
 Input : cart_dataset.csv from tools/build_cart_dataset.py
-        label 1 = Danger (frame lost), 0 = Safe (got through); Danger is the positive class.
+        default source: Baseline data packets; heartbeat rows are diagnostic only.
+        Data labels require receiver-reconciled evidence from build_cart_dataset.py.
+        label 1 = Danger, 0 = Safe; Danger is the positive class.
 Output: <out-dir>/report.txt          metrics, chosen Pf threshold, tree rules
         <out-dir>/report.json         the same numbers, machine-readable
         <out-dir>/threshold_sweep.csv / .png   Precision, Recall, F1 for each Pf threshold
@@ -35,6 +37,7 @@ import argparse
 import json
 import sys
 from pathlib import Path
+from model_provenance import stamp_header, freeze_record
 
 try:
     import numpy as np
@@ -68,6 +71,20 @@ def load(path, features, train_source):
         sys.exit(f"{path} has no column(s) {missing}. Rebuild it with tools/build_cart_dataset.py.")
     columns = [FEATURE_COLUMNS[f][0] for f in features]
     pool = df if train_source == "all" else df[df.source == train_source]
+    if (pool.source == 'data').any():
+        if 'label_basis' not in pool:
+            sys.exit('Data rows lack receiver-reconciled label provenance. Rebuild from paired logs and reviewed coverage.')
+        invalid = (pool.source == 'data') & ((pool.label_basis != 'receiver_reconciled_v1') | ~pool.label.isin([0, 1]))
+        if invalid.any():
+            sys.exit('Unverified data labels cannot be used for training. Review the dataset audit and receiver coverage.')
+    if train_source == "data":
+        if "config" not in df.columns:
+            sys.exit("Dataset has no configuration metadata. Rebuild it with "
+                     "tools/build_cart_dataset.py and capture each node's CONFIG row.")
+        before_config = len(pool)
+        pool = pool[pool.config == "baseline"]
+        if before_config != len(pool):
+            print(f"Excluded {before_config - len(pool)} data rows not identified as Baseline.")
     external = df[df.source == "data"] if train_source == "heartbeat" else df.iloc[0:0]
     before = len(pool)
     pool = pool.dropna(subset=columns)
@@ -75,8 +92,8 @@ def load(path, features, train_source):
         print(f"Dropped {before - len(pool)} of {before} training rows with an empty feature "
               f"({', '.join(c for c in columns if df[c].isna().any())}).")
     if "battery" in features and len(pool) < 0.5 * before:
-        print("WARNING: most rows have no battery value. Re-flash with the LiPo build, "
-              "or train with --features rssi,snr,traffic.")
+        print("WARNING: most rows have no battery value. Verify the actual sensing path and calibration; "
+              "a build flag alone does not establish valid battery measurements.")
     external = external.dropna(subset=columns)
     return pool.reset_index(drop=True), external.reset_index(drop=True), columns
 
@@ -108,7 +125,12 @@ def split(data, how, test_size, seed):
             if best is not None:
                 mask = best[1]
                 return np.where(~mask)[0], np.where(mask)[0]
-        print(f"NOTE: only {len(sessions)} session(s) with both classes; using a stratified split instead.")
+        sys.exit(
+            "Cannot form a session-level split with both classes in each partition "
+            f"from {len(sessions)} session(s). Collect more independent sessions with "
+            "Safe and Danger outcomes. Row-level fallback is disabled to prevent "
+            "session leakage."
+        )
     train_idx, test_idx = train_test_split(np.arange(len(data)), test_size=test_size,
                                            stratify=y, random_state=seed)
     return train_idx, test_idx
@@ -231,7 +253,7 @@ inline bool cartIsRisky(const float x[CART_FEATURE_COUNT]) {{
 #endif
 """
     Path(path).parent.mkdir(parents=True, exist_ok=True)
-    Path(path).write_text(text, encoding="utf-8")
+    Path(path).write_text(stamp_header(text), encoding="utf-8")
 
 
 # ----------------------------------------------------------------------------- plots
@@ -293,13 +315,29 @@ def plots(out, tree, features, sweep_df, chosen, test_scores):
 
 
 # ----------------------------------------------------------------------------- main
+def select_threshold(sweep_df):
+    """Maximise Danger F1, breaking equal-F1 ties by higher Danger Recall.
+
+    If both scores tie, prefer the threshold nearest 0.5, then the lower
+    threshold as a reproducible final tie-break. Only validation scores enter.
+    """
+    required = ['threshold', 'f1', 'recall']
+    if sweep_df.empty or any(name not in sweep_df for name in required):
+        raise ValueError('Threshold selection needs validation threshold, F1 and Recall rows')
+    if not np.isfinite(sweep_df[required].to_numpy(dtype=float)).all():
+        raise ValueError('Threshold selection requires finite validation scores')
+    ranked = sweep_df.assign(_distance=(sweep_df.threshold - 0.5).abs()).sort_values(
+        ['f1', 'recall', '_distance', 'threshold'], ascending=[False, False, True, True], kind='stable')
+    return float(ranked.iloc[0].threshold)
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("dataset", help="cart_dataset.csv from build_cart_dataset.py")
     parser.add_argument("--features", default=DEFAULT_FEATURES,
                         help=f"comma list from {','.join(FEATURE_COLUMNS)} (default {DEFAULT_FEATURES})")
-    parser.add_argument("--train-source", choices=["heartbeat", "data", "all"], default="heartbeat",
-                        help="rows to train on (default heartbeat; data rows are then the external test)")
+    parser.add_argument("--train-source", choices=["heartbeat", "data", "all"], default="data",
+                        help="rows to train on (default: Baseline data rows; heartbeat/all are diagnostic alternatives)")
     parser.add_argument("--split", choices=["session", "stratified"], default="session")
     parser.add_argument("--test-size", type=float, default=0.2)
     parser.add_argument("--max-depth", type=int, default=5)
@@ -336,8 +374,7 @@ def main():
     if args.threshold is not None:
         chosen = args.threshold
     else:
-        best = sweep_df[sweep_df.f1 == sweep_df.f1.max()]
-        chosen = float(best.iloc[(best.threshold - 0.5).abs().argsort().iloc[0]].threshold)
+        chosen = select_threshold(sweep_df)
 
     # 2. Final tree on all training rows; Pf per leaf from those rows.
     tree = make_tree(args).fit(X[train_idx], y[train_idx])
@@ -365,6 +402,10 @@ def main():
     summary = (f"Trained on {len(train_idx)} {args.train_source} rows, split by {args.split}; "
                f"test F1 = {test_scores['f1']:.3f}, Recall = {test_scores['recall']:.3f}")
     write_header(args.header, tree, columns, features, ratio, chosen, summary)
+    # Includes every development session, including held-out test and tuning
+    # sessions: independent shadow evaluation must use newly collected sessions.
+    used_sessions = list(data.session) + (list(external.session) if len(external) else [])
+    result.update(freeze_record(args.header, used_sessions))
     plots(out, tree, features, sweep_df, chosen, test_scores)
     (out / "report.json").write_text(json.dumps(result, indent=2), encoding="utf-8")
 

@@ -321,6 +321,43 @@
             .priority-alert-icon { flex-basis: 32px; height: 32px; }
             .header-badges { flex-wrap: wrap; }
         }
+        /* Five readable columns on laptops; labelled report cards on phones. */
+        body { font-size: 16px; line-height: 1.5; }
+        .table-panel { overflow: visible; min-width: 0; }
+        .report-tools { display: flex; align-items: end; flex-wrap: wrap; gap: 12px; }
+        .report-tools label { display: grid; gap: 4px; color: #c5d0de; font-size: 14px; }
+        .filter-select, .btn { font-size: 14px; min-height: 44px; }
+        .filter-select:focus-visible, .btn:focus-visible, summary:focus-visible { outline: 3px solid #79c0ff; outline-offset: 3px; }
+        #liveStatus { display: block; margin: 10px 0; overflow-wrap: anywhere; }
+        table { table-layout: fixed; font-size: 15px; }
+        th, td { padding: 14px 10px; vertical-align: top; overflow-wrap: anywhere; }
+        th { white-space: normal; position: static; }
+        th:nth-child(1) { width: 16%; } th:nth-child(2) { width: 37%; }
+        th:nth-child(3) { width: 16%; } th:nth-child(4) { width: 15%; } th:nth-child(5) { width: 16%; }
+        .p-badge { font-size: 13px; white-space: normal; }
+        .loc-text { font-size: 16px; color: #f0f6fc; font-weight: 750; margin-bottom: 6px; }
+        .msg-text { max-width: none; font-size: 16px; white-space: pre-wrap; }
+        .report-ref { font-weight: 700; color: #79c0ff; }
+        .receipt-note, .technical-note { color: #aeb9c7; font-size: 13px; }
+        .report-details summary { cursor: pointer; color: #79c0ff; padding: 4px 0; min-height: 44px; }
+        .report-details dl { font-size: 13px; margin-top: 8px; }
+        .report-details dt { color: #aeb9c7; margin-top: 8px; }
+        .report-details dd { margin: 0; overflow-wrap: anywhere; color: #e6edf6; }
+        @media (max-width: 760px) {
+            body { padding: 12px; }
+            .table-panel { padding: 12px; }
+            table, tbody, tr, td { display: block; width: 100%; }
+            thead { position: absolute; width: 1px; height: 1px; padding: 0; overflow: hidden; clip-path: inset(50%); }
+            tbody tr { border: 1px solid #34445b; border-radius: 8px; margin: 14px 0; overflow: hidden; }
+            td { border: 0; padding: 9px 12px; }
+            td[data-label]::before { content: attr(data-label); display: block; font-size: 12px; font-weight: 700; color: #aeb9c7; margin-bottom: 3px; }
+            .priority-row-sos { border-left: 4px solid #ff4d57; }
+            .priority-row-sos td:first-child { border-left: 0; }
+            .report-tools { width: 100%; }
+            .report-tools label { flex: 1 1 160px; }
+            .report-tools select { width: 100%; }
+            .metric-card { padding: 12px; }
+        }
     </style>
 </head>
 <body>
@@ -328,21 +365,19 @@
     <header>
         <div class="header-title">
             <h1>&#128225; Main Hub Emergency Command (V1)</h1>
-            <div class="subtitle">Barangay San Miguel Offline LoRa Mesh Network &bull; Stationary Aggregator Terminal</div>
+            <div class="subtitle">Barangay San Miguel &bull; Reports received at the main hub</div>
         </div>
         <div class="header-badges">
-            <span class="badge badge-mesh">915 MHz LoRa</span>
-            <span class="badge badge-crypto">AES-128-CBC + HMAC-SHA-256</span>
             <span class="badge badge-hub">Node V1 (Stationary Hub)</span>
         </div>
     </header>
 
-    <section id="sosAlert" class="priority-alert is-clear" aria-live="polite" aria-atomic="true">
+    <section id="sosAlert" class="priority-alert" aria-live="polite" aria-atomic="true">
         <div class="priority-alert-icon" aria-hidden="true">!</div>
         <div>
-            <div class="priority-alert-label">Priority 1 · incoming reports</div>
-            <h2 id="sosTitle">No Priority 1 reports</h2>
-            <p id="sosSummary">Medical SOS reports received by this node will appear here.</p>
+            <div class="priority-alert-label">Medical reports on this page</div>
+            <h2 id="sosTitle">Checking recent reports...</h2>
+            <p id="sosSummary">Counts are unavailable until the hub responds.</p>
             <ul id="sosList" class="priority-alert-list"></ul>
         </div>
     </section>
@@ -350,24 +385,20 @@
     <!-- Top Statistical Metrics (Chapter 4 Thesis Validation) -->
     <div class="metrics-grid">
         <div class="metric-card">
-            <div class="metric-label">Total Messages (N)</div>
-            <div class="metric-val" id="metricTotal">0</div>
+            <div class="metric-label">Reports on this page</div>
+            <div class="metric-val" id="metricTotal">--</div>
         </div>
         <div class="metric-card metric-card-sos">
-            <div class="metric-label">Medical SOS (k=1)</div>
-            <div class="metric-val sos" id="metricSOS">0</div>
+            <div class="metric-label">Medical reports shown</div>
+            <div class="metric-val sos" id="metricSOS">--</div>
         </div>
         <div class="metric-card">
-            <div class="metric-label">General Emerg. (k=2)</div>
-            <div class="metric-val gen" id="metricGen">0</div>
+            <div class="metric-label">General emergencies shown</div>
+            <div class="metric-val gen" id="metricGen">--</div>
         </div>
         <div class="metric-card">
-            <div class="metric-label">Routine / Info (k=3)</div>
-            <div class="metric-val rout" id="metricRout">0</div>
-        </div>
-        <div class="metric-card">
-            <div class="metric-label">Measured E2E Latency</div>
-            <div class="metric-val" id="metricLatency">0.00 s</div>
+            <div class="metric-label">Routine reports shown</div>
+            <div class="metric-val rout" id="metricRout">--</div>
         </div>
     </div>
 
@@ -375,39 +406,47 @@
         <div class="table-panel">
             <div class="table-controls">
                 <div class="panel-header" style="margin:0;">
-                    <span>Received LoRa Messages</span>
+                    <span>Received report history</span>
                 </div>
-                <div>
-                    <span id="liveStatus" role="status" style="font-size:12px; color:#8b949e; margin-right:12px;">Connecting</span>
-                    <label style="font-size:12px; color:#8b949e; margin-right:6px;">Sort:</label>
-                    <select id="sortOrder" class="filter-select" onchange="renderTable()" style="margin-right:12px;">
+                <div class="report-tools">
+                    <label for="sortOrder">Sort reports
+                    <select id="sortOrder" class="filter-select" onchange="renderTable()">
                         <option value="arrival">Arrival order (first &rarr; last)</option>
                         <option value="newest">Newest first</option>
-                        <option value="priority">Priority (k=1 on top)</option>
+                        <option value="priority">Medical reports first</option>
                     </select>
-                    <label style="font-size:12px; color:#8b949e; margin-right:6px;">Filter Priority:</label>
+                    </label>
+                    <label for="priorityFilter">Show category
                     <select id="priorityFilter" class="filter-select" onchange="renderTable()">
-                        <option value="all">All Priorities</option>
-                        <option value="1">k=1 (Medical SOS)</option>
-                        <option value="2">k=2 (General Emergency)</option>
-                        <option value="3">k=3 (Routine / Info)</option>
+                        <option value="all">All categories</option>
+                        <option value="1">Medical SOS</option>
+                        <option value="2">General emergency</option>
+                        <option value="3">Routine update</option>
                     </select>
+                    </label>
+                    <button type="button" class="btn btn-export" onclick="exportToCSV()">Export this page</button>
+                    <button type="button" id="exportHistoryBtn" class="btn btn-export" onclick="exportRetainedHistory()">Export retained history</button>
                 </div>
             </div>
 
-            <table>
+            <span id="liveStatus" role="status">Connecting</span>
+            <nav class="report-tools" aria-label="Report history pages">
+                <button type="button" class="btn" id="newerPageBtn" onclick="changeHistoryPage(-1)" disabled>Newer page</button>
+                <span id="pageStatus" role="status">Page unavailable</span>
+                <button type="button" class="btn" id="olderPageBtn" onclick="changeHistoryPage(1)" disabled>Older page</button>
+                <button type="button" class="btn" id="latestPageBtn" onclick="showLatestReports()">Return to latest / refresh</button>
+            </nav>
+            <p id="exportStatus" role="status" class="technical-note"></p>
+            <p id="historyNotice" style="margin:12px 0; color:#aeb9c7; line-height:1.5;">This is a limited recent-report view. Complete experimental records must be saved separately through USB logging.</p>
+            <p class="technical-note" id="timingNotice">Receipt times below show hub uptime, not delivery delay. Delivery timing requires verified paired logs.</p>
+            <table aria-label="Recent reports received at the main hub">
                 <thead>
                     <tr>
-                        <th>Arrival #</th>
-                        <th>Ref# / ID</th>
-                        <th>Priority</th>
-                        <th>Type</th>
-                        <th>Origin</th>
-                        <th>Multi-Hop Path</th>
-                        <th>Latency (e2e)</th>
-                        <th>AES Security</th>
-                        <th>Location & Details</th>
-                        <th>Received (uptime)</th>
+                        <th scope="col">Category</th>
+                        <th scope="col">Location &amp; report</th>
+                        <th scope="col">Reference</th>
+                        <th scope="col">Received at hub</th>
+                        <th scope="col">Technical details</th>
                     </tr>
                 </thead>
                 <tbody id="incidentTableBody"></tbody>
@@ -418,6 +457,14 @@
     <script>
         let incidentLogs = [];
         let liveFetchInProgress = false;
+        let hasLiveData = false;
+        let lastLiveUpdateMs = null;
+        let recentLimit = null;
+        let recordedSinceBoot = null;
+        const openReportDetails = new Set();
+        let historyPage = 1, historyPages = 1, historySnapshot = null, historySession = null;
+        let historyFrozen = false, historyCapacity = null, historyRetained = null;
+        let historyExportActive = false;
 
         function updateMetrics() {
             const emergencies = incidentLogs.filter(m => m.packetType !== 1 && m.packetType !== 3);
@@ -431,33 +478,27 @@
             document.getElementById('metricGen').innerText = k2;
             document.getElementById('metricRout').innerText = k3;
 
-            const measuredLatency = emergencies
-                .map(m => m.latencyMs == null ? NaN : Number(m.latencyMs))
-                .filter(value => Number.isFinite(value) && value >= 0);
-            document.getElementById('metricLatency').innerText = measuredLatency.length
-                ? `${(measuredLatency.reduce((sum, value) => sum + value, 0) / measuredLatency.length / 1000).toFixed(2)} s`
-                : 'N/A (clock not synchronized)';
             updateEmergencyNotice();
         }
 
         function updateEmergencyNotice() {
             const reports = incidentLogs
                 .filter(m => m.priority === 1)
-                .sort((a, b) => new Date(b.rxTime).getTime() - new Date(a.rxTime).getTime());
+                .sort((a, b) => Number(b.arrival != null ? b.arrival : b.rxTime) - Number(a.arrival != null ? a.arrival : a.rxTime));
             const alert = document.getElementById('sosAlert');
             const list = document.getElementById('sosList');
             list.textContent = '';
             alert.classList.toggle('has-sos', reports.length > 0);
             alert.classList.toggle('is-clear', reports.length === 0);
             document.getElementById('sosTitle').textContent = reports.length
-                ? `${reports.length} Priority 1 SOS report${reports.length === 1 ? '' : 's'}`
-                : 'No Priority 1 reports';
+                ? `${reports.length} medical report${reports.length === 1 ? '' : 's'} on this page`
+                : 'No medical reports on this page';
             document.getElementById('sosSummary').textContent = reports.length
-                ? `Latest ${Math.min(reports.length, 3)} received report${reports.length === 1 ? '' : 's'} shown below.`
-                : 'Medical SOS reports received by this node will appear here.';
+                ? `Latest ${Math.min(reports.length, 3)} shown below. This counts received records, not unread or unresolved emergencies.`
+                : 'This describes this page only, not all reports or unresolved emergencies.';
             reports.slice(0, 3).forEach(report => {
                 const item = document.createElement('li');
-                item.textContent = `#${report.id} · ${report.location} — ${report.message}`;
+                item.textContent = `${report.origin || `V${report.originNode}`}#${String(report.id).padStart(4, '0')} · ${report.location} — ${report.message}`;
                 list.appendChild(item);
             });
         }
@@ -486,92 +527,99 @@
             if (filtered.length === 0) {
                 const row = document.createElement('tr');
                 const cell = document.createElement('td');
-                cell.colSpan = 10;
+                cell.colSpan = 5;
                 cell.style.cssText = 'text-align:center; padding:24px; color:#8b949e;';
-                cell.textContent = 'No authenticated LoRa messages have been received.';
+                cell.textContent = !hasLiveData ? 'Hub records are unavailable. Check the connection and sign-in.'
+                    : incidentLogs.length ? 'No recent reports match this filter.' : 'The hub returned no recent report records.';
                 row.appendChild(cell);
                 tbody.appendChild(row);
                 return;
             }
 
+            const retainedKeys = new Set(incidentLogs.map(m => `${m.originNode}:${m.id}:${m.arrival}:${m.rxTime}`));
+            for (const key of openReportDetails) if (!retainedKeys.has(key)) openReportDetails.delete(key);
             filtered.forEach(m => {
                 const tr = document.createElement('tr');
                 if (m.priority === 1) tr.className = 'priority-row-sos';
                 const priorityCell = document.createElement('td');
+                priorityCell.setAttribute('data-label', 'Category');
                 const priorityBadge = document.createElement('span');
                 priorityBadge.className = `p-badge ${m.priority === 1 ? 'p-sos' : m.priority === 2 ? 'p-gen' : 'p-rout'}`;
-                priorityBadge.textContent = m.priority === 1 ? 'MEDICAL SOS (k=1)' : m.priority === 2 ? 'GENERAL (k=2)' : 'ROUTINE / INFO (k=3)';
+                priorityBadge.textContent = m.priority === 1 ? 'Medical SOS' : m.priority === 2 ? 'General emergency' : 'Routine update';
                 priorityCell.appendChild(priorityBadge);
 
                 const typeNames = ['SOS', 'HEARTBEAT', 'TELEMETRY', 'ACK'];
                 const receivedSeconds = Number(m.rxTime) / 1000;
                 const latencyMs = m.latencyMs == null ? NaN : Number(m.latencyMs);
                 const gap = gapSeconds.get(m);
-                const cells = [
-                    m.arrival != null ? `${m.arrival}` : '-',
-                    `#${m.id}`,
-                    null,
-                    typeNames[m.packetType] || 'UNKNOWN',
-                    m.origin || `V${m.originNode}`,
-                    m.route || 'N/A',
-                    Number.isFinite(latencyMs) && latencyMs >= 0 ? `${(latencyMs / 1000).toFixed(2)} s` : 'N/A',
-                    m.crypto || 'Authenticated',
-                    null,
-                    Number.isFinite(receivedSeconds)
-                        ? `T+${receivedSeconds.toFixed(1)} s` + (gap != null ? ` (+${gap.toFixed(1)} s)` : '')
-                        : 'N/A'
-                ];
-                cells.forEach((value, index) => {
-                    if (index === 2) {
-                        tr.appendChild(priorityCell);
-                        return;
-                    }
+                const addCell = (label, className, text) => {
                     const cell = document.createElement('td');
-                    if (index === 0) cell.style.cssText = 'font-weight:800; color:#f0f6fc; text-align:center;';
-                    if (index === 1) cell.style.cssText = 'font-weight:700; color:#58a6ff;';
-                    if (index === 4) cell.style.cssText = 'font-weight:600; color:#f0f6fc;';
-                    if (index === 5) {
-                        const route = document.createElement('span');
-                        route.className = 'route-tag';
-                        route.textContent = value;
-                        cell.appendChild(route);
-                    } else if (index === 6) {
-                        const latency = document.createElement('span');
-                        latency.className = 'latency-tag';
-                        latency.textContent = value;
-                        cell.appendChild(latency);
-                    } else if (index === 7) {
-                        const crypto = document.createElement('span');
-                        crypto.className = 'crypto-tag';
-                        crypto.textContent = value;
-                        cell.appendChild(crypto);
-                    } else if (index === 8) {
-                        const location = document.createElement('div');
-                        location.className = 'loc-text';
-                        location.textContent = m.location || 'Unspecified';
-                        const message = document.createElement('div');
-                        message.className = 'msg-text';
-                        message.textContent = m.message || '';
-                        cell.append(location, message);
-                    } else {
-                        cell.textContent = value;
-                    }
+                    cell.setAttribute('data-label', label);
+                    cell.className = className || '';
+                    if (text != null) cell.textContent = text;
                     tr.appendChild(cell);
+                    return cell;
+                };
+                tr.appendChild(priorityCell);
+                const reportCell = addCell('Location & report');
+                const location = document.createElement('div');
+                location.className = 'loc-text';
+                location.textContent = m.location || 'Location not specified';
+                const message = document.createElement('div');
+                message.className = 'msg-text';
+                message.textContent = m.message || '';
+                reportCell.append(location, message);
+                addCell('Reference', 'report-ref', `${m.origin || `V${m.originNode}`}#${String(m.id).padStart(4, '0')}`);
+                const receipt = addCell('Received at hub', '', Number.isFinite(receivedSeconds)
+                    ? `${receivedSeconds.toFixed(1)} s after hub restart` : 'Time unavailable');
+                const arrival = document.createElement('div');
+                arrival.className = 'receipt-note';
+                arrival.textContent = m.arrival != null ? `Arrival #${m.arrival}` : 'Arrival number unavailable';
+                receipt.appendChild(arrival);
+                const technicalCell = addCell('Technical details');
+                const details = document.createElement('details');
+                details.className = 'report-details';
+                const key = `${m.originNode}:${m.id}:${m.arrival}:${m.rxTime}`;
+                details.open = openReportDetails.has(key);
+                details.addEventListener('toggle', () => {
+                    if (details.open) openReportDetails.add(key); else openReportDetails.delete(key);
                 });
+                const summary = document.createElement('summary');
+                summary.textContent = 'View details';
+                const list = document.createElement('dl');
+                const technical = [
+                    ['Origin node', m.origin || `V${m.originNode}`],
+                    ['Radio path', m.route || 'Unavailable'],
+                    ['Packet type', typeNames[m.packetType] || 'UNKNOWN'],
+                    ['Security', m.crypto || 'Not supplied'],
+                    ['Clock difference (unverified)', Number.isFinite(latencyMs) && latencyMs >= 0 ? `${(latencyMs / 1000).toFixed(2)} s — not verified delivery delay` : 'Unavailable'],
+                    ['Gap from preceding retained arrival', gap != null && gap >= 0 ? `${gap.toFixed(1)} s — not delivery delay` : 'Unavailable']
+                ];
+                technical.forEach(([label, value]) => {
+                    const dt = document.createElement('dt'); dt.textContent = label;
+                    const dd = document.createElement('dd'); dd.textContent = value;
+                    list.append(dt, dd);
+                });
+                details.append(summary, list);
+                technicalCell.appendChild(details);
                 tbody.appendChild(tr);
             });
         }
 
-        function exportToCSV() {
-            if (incidentLogs.length === 0) {
+        function exportToCSV(records = incidentLogs, scope = 'page_view_only', context = { session: historySession, snapshot: historySnapshot }) {
+            if (records.length === 0) {
                 alert("No received messages are available to export.");
                 return;
             }
-            const csvCell = value => `"${String(value == null ? '' : value).replace(/"/g, '""')}"`;
-            const rows = [["Arrival_No", "Message_ID", "Priority", "Packet_Type", "Origin_Node", "Path", "Latency_ms", "Security", "Location", "Message", "Rx_Uptime_ms"]];
-            incidentLogs.forEach(m => {
+            const csvCell = value => {
+                let text = String(value == null ? '' : value);
+                if (typeof value === 'string' && /^[=+\-@\t\r]/.test(text)) text = "'" + text;
+                return `"${text.replace(/"/g, '""')}"`;
+            };
+            const rows = [["Scope", "Hub_Session", "History_Snapshot", "Reference", "Arrival_No", "Message_ID", "Priority", "Packet_Type", "Origin_Node", "Path", "Unverified_Clock_Difference_ms", "Security", "Location", "Message", "Rx_Uptime_ms"]];
+            records.forEach(m => {
                 const packetType = ["SOS", "HEARTBEAT", "TELEMETRY", "ACK"][m.packetType] || "UNKNOWN";
-                rows.push([m.arrival, m.id, m.priority, packetType, m.origin, m.route,
+                rows.push([scope, context.session, context.snapshot, `${m.origin || `V${m.originNode}`}#${String(m.id).padStart(4, '0')}`, m.arrival, m.id, m.priority, packetType, m.origin, m.route,
                     m.latencyMs, m.crypto, m.location, m.message, m.rxTime]);
             });
 
@@ -580,36 +628,144 @@
             const link = document.createElement("a");
             const url = URL.createObjectURL(blob);
             link.setAttribute("href", url);
-            link.setAttribute("download", `Brgy_San_Miguel_Live_Incidents_${Date.now()}.csv`);
+            link.setAttribute("download", `Brgy_San_Miguel_${scope === 'page_view_only' ? 'Page_Reports' : 'Retained_History'}_${Date.now()}.csv`);
             document.body.appendChild(link);
             link.click();
             document.body.removeChild(link);
+            setTimeout(() => URL.revokeObjectURL(url), 1000);
         }
 
-        async function refreshLiveIncidents() {
+        async function readHistoryPage(page, snapshot = null, session = null) {
+            const controller = new AbortController();
+            const timer = setTimeout(() => controller.abort(), 8000);
+            try {
+                const query = `?page=${page}` + (snapshot == null ? '' : `&snapshot=${snapshot}&session=${session}`);
+                const response = await fetch('/api/live_incidents' + query, { cache: 'no-store', signal: controller.signal });
+                if (!response.ok) throw new Error(response.status === 409 ? 'History expired or hub restarted. Return to latest reports.' : `HTTP ${response.status}`);
+                const records = await response.json();
+                if (!Array.isArray(records) || records.some(m => !m ||
+                    !Number.isInteger(m.originNode) || m.originNode < 1 || m.originNode > 6 ||
+                    !Number.isInteger(m.id) || m.id < 0 || m.id > 65535 ||
+                    !Number.isInteger(m.priority) || m.priority < 1 || m.priority > 3 ||
+                    !Number.isFinite(m.rxTime) || m.rxTime < 0)) {
+                    throw new Error('Invalid live incident response');
+                }
+                const headerNumber = name => {
+                    const raw = response.headers.get(name);
+                    return raw != null && /^\d+$/.test(raw) ? Number(raw) : null;
+                };
+                const meta = {
+                    limit: headerNumber('X-Recent-Limit'), total: headerNumber('X-Recorded-Since-Boot'),
+                    capacity: headerNumber('X-History-Capacity'), retained: headerNumber('X-History-Retained'),
+                    pages: headerNumber('X-History-Pages'), snapshot: headerNumber('X-History-Snapshot'),
+                    session: headerNumber('X-Hub-Session')
+                };
+                if (meta.capacity != null && (!Object.values(meta).every(Number.isSafeInteger) ||
+                    meta.capacity < 1 || meta.limit < 1 || meta.session < 0 || meta.session > 4294967295 ||
+                    meta.pages !== Math.max(1, Math.ceil(meta.retained / meta.limit)) || meta.pages < page ||
+                    meta.retained !== Math.min(meta.snapshot, meta.capacity) || meta.total < meta.snapshot ||
+                    records.length !== Math.min(meta.limit, meta.retained - (page - 1) * meta.limit) ||
+                    records.some(m => !Number.isInteger(m.arrival) || m.arrival > meta.snapshot - (page - 1) * meta.limit ||
+                        m.arrival < meta.snapshot - (page - 1) * meta.limit - records.length + 1) ||
+                    new Set(records.map(m => m.arrival)).size !== records.length ||
+                    (snapshot != null && (meta.snapshot !== snapshot || meta.session !== session)))) {
+                    throw new Error('Invalid history pagination metadata');
+                }
+                return { records, meta };
+            } finally {
+                clearTimeout(timer);
+            }
+        }
+
+        function changeHistoryPage(delta) {
+            const target = historyPage + delta;
+            if (!hasLiveData || historySnapshot == null || target < 1 || target > historyPages) return;
+            return refreshLiveIncidents(target, historySnapshot, historySession);
+        }
+
+        function showLatestReports() { return refreshLiveIncidents(1); }
+
+        async function exportRetainedHistory() {
+            if (historyExportActive) return;
+            historyExportActive = true;
+            const button = document.getElementById('exportHistoryBtn');
+            const status = document.getElementById('exportStatus');
+            button.disabled = true;
+            status.textContent = 'Reading retained history...';
+            try {
+                const first = await readHistoryPage(1);
+                if (first.meta.capacity == null) throw new Error('This firmware does not support complete retained-history export.');
+                const records = first.records.slice();
+                for (let page = 2; page <= first.meta.pages; page++) {
+                    const next = await readHistoryPage(page, first.meta.snapshot, first.meta.session);
+                    records.push(...next.records);
+                }
+                if (records.length !== first.meta.retained || new Set(records.map(m => m.arrival)).size !== records.length) {
+                    throw new Error('Incomplete or duplicate history. No partial CSV was downloaded.');
+                }
+                if (!records.length) { status.textContent = 'No retained reports to export.'; return; }
+                records.sort((a, b) => a.arrival - b.arrival);
+                exportToCSV(records, 'retained_history_snapshot', first.meta);
+                status.textContent = `Exported ${records.length} retained reports. RAM history is limited and clears on restart; keep complete USB logs.`;
+            } catch (error) {
+                status.textContent = `Export failed: ${error.message} No partial CSV was downloaded.`;
+            } finally {
+                button.disabled = false;
+                historyExportActive = false;
+            }
+        }
+
+        async function refreshLiveIncidents(page = 1, snapshot = null, session = null) {
             if (liveFetchInProgress) return;
             liveFetchInProgress = true;
+            for (const id of ['newerPageBtn', 'olderPageBtn', 'latestPageBtn']) document.getElementById(id).disabled = true;
             const status = document.getElementById('liveStatus');
             try {
-                const response = await fetch('/api/live_incidents', { cache: 'no-store' });
-                if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                const records = await response.json();
-                if (!Array.isArray(records)) throw new Error('Invalid live incident response');
+                const { records, meta } = await readHistoryPage(page, snapshot, session);
+                const recordsChanged = !hasLiveData || JSON.stringify(records) !== JSON.stringify(incidentLogs);
                 incidentLogs = records;
-                status.textContent = `Live · ${records.length} buffered`;
+                hasLiveData = true;
+                lastLiveUpdateMs = Date.now();
+                recentLimit = meta.limit;
+                recordedSinceBoot = meta.total;
+                historyPage = page; historyPages = meta.pages || 1;
+                historySnapshot = meta.snapshot; historySession = meta.session;
+                historyCapacity = meta.capacity; historyRetained = meta.retained;
+                historyFrozen = snapshot != null;
+                document.getElementById('newerPageBtn').disabled = page <= 1;
+                document.getElementById('olderPageBtn').disabled = page >= historyPages;
+                document.getElementById('pageStatus').textContent = `Page ${page} of ${historyPages}`;
+                status.textContent = `Connected · ${historyFrozen ? 'saved history snapshot; return to latest to resume live updates' : 'live latest page'} · last updated ${new Date(lastLiveUpdateMs).toLocaleTimeString()}`;
                 status.style.color = '#3fb950';
-                updateMetrics();
-                renderTable();
+                document.getElementById('historyNotice').textContent = `Showing ${records.length} reports on this page` +
+                    (recordedSinceBoot == null ? '.' : ` out of ${recordedSinceBoot} hub-recorded reports since restart.`) +
+                    (historyCapacity == null ? ' Pagination unavailable with this firmware.' : ` Snapshot contains ${historyRetained} retained reports; RAM holds the latest ${historyCapacity}, ${recentLimit} per page.`) +
+                    (historyCapacity != null && recordedSinceBoot > historyCapacity ? ` ${recordedSinceBoot - historyCapacity} older reports have already been replaced in RAM.` : '') +
+                    ' History clears when the hub restarts. Counts, category filtering and sorting describe this page only. Export this page or all retained history; save complete experimental records separately through USB logging. Uptime and arrival gaps are not delivery delay.';
+                if (recordsChanged) {
+                    updateMetrics();
+                    renderTable();
+                }
             } catch (error) {
-                status.textContent = 'Live feed unavailable';
+                status.textContent = hasLiveData
+                    ? `Update unavailable · ${error.message} · showing saved view from ${new Date(lastLiveUpdateMs).toLocaleTimeString()}`
+                    : 'Hub records unavailable · check connection and sign-in';
                 status.style.color = '#ff7b72';
+                if (!hasLiveData) {
+                    document.getElementById('sosTitle').textContent = 'Recent reports unavailable';
+                    document.getElementById('sosSummary').textContent = 'An unavailable connection does not mean that no reports were received.';
+                    renderTable();
+                }
             } finally {
                 liveFetchInProgress = false;
+                document.getElementById('newerPageBtn').disabled = !hasLiveData || historyPage <= 1;
+                document.getElementById('olderPageBtn').disabled = !hasLiveData || historyPage >= historyPages;
+                document.getElementById('latestPageBtn').disabled = false;
             }
         }
 
         refreshLiveIncidents();
-        setInterval(refreshLiveIncidents, 3000);
+        setInterval(() => { if (!historyFrozen) refreshLiveIncidents(); }, 3000);
     </script>
 </body>
 </html>

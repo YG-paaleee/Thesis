@@ -6,15 +6,17 @@ Each output row = one attempt to get a frame across one link:
   features : rssi, snr, battery, peer_traffic, peer_hb_age_ms
              (what the node knew about the neighbour BEFORE the attempt;
               battery = the neighbour's LiPo level from its last heartbeat, %)
-  label    : 1 = Danger (the frame was lost), 0 = Safe (it got through)
+  label    : 1 = Danger, 0 = Safe (receiver-reconciled data outcomes only)
              -- the paper's convention (4.4.2, Table 4.5); Danger is the positive class
 
 Two sources (column "source"):
   heartbeat  HB_OK / HB_MISS rows. The RECEIVING node labels every heartbeat it
              expected from a neighbour (sequence numbers). Link = peer -> node.
-             Used to TRAIN CART (Test F: passive, no messages needed).
-  data       data TX row + its ACK / NOACK. The SENDING node logs them.
-             Link = node -> peer. Used to TEST CART on real relaying (final evaluation).
+             Retained for diagnostics; not the default CART training source.
+  data       data TX row + completion + intended-receiver decision and coverage.
+             Link = node -> peer. Baseline rows are the default CART training source.
+             Without reviewed clock/coverage evidence, data rows stay unlabelled.
+             All candidates are retained in an audit CSV, including exclusions.
 
 Usage (Windows):
   python tools\\build_cart_dataset.py F*.csv
@@ -28,13 +30,14 @@ import glob
 import sys
 from pathlib import Path
 
+from receiver_labels import detail_fields, read_coverage, reconciled_rows
+
 try:
     import pandas as pd
 except ImportError:
     sys.exit("pandas is missing: run  pip install pandas")
 
 HB_AGE_CAP_MS = 300_000          # missing / very old heartbeat age is capped here
-ACK_TIMEOUT_MS = 60_000          # a data TX with no ACK within 60 s counts as failed
 DATA_TYPES = {0, 2}              # SOS, TELEMETRY (not heartbeat 1, not ACK 3)
 FEATURES = ["rssi", "snr", "battery", "peer_traffic", "peer_hb_age_ms"]
 DANGER, SAFE = 1, 0
@@ -49,9 +52,21 @@ def load(paths):
     frames = []
     for path in paths:
         df = pd.read_csv(path)
+        df['detail'] = df.detail.fillna('')
+        df['_boot_config'] = df.detail.map(lambda value: detail_fields(value).get('boot', 'legacy'))
         if "session" not in df.columns:
             df["session"] = Path(path).stem
-        df["file"] = Path(path).name
+        # An unambiguous boot CONFIG is required per node and capture file.
+        # Missing or mixed configurations are unknown and cannot enter default training.
+        configs = df[df.event == "CONFIG"].copy()
+        configs["config"] = configs.detail.astype(str).str.extract(r"(?:^|;)cfg=([^;]+)")[0]
+        by_node = configs.groupby(["node", "_boot_config"])["config"].agg(
+            lambda values: values.iloc[0] if len(values) and values.notna().all()
+            and values.nunique() == 1 else "unknown"
+        )
+        df["config"] = pd.Series(list(zip(df.node, df._boot_config)), index=df.index).map(by_node).fillna("unknown")
+        df["file"] = str(Path(path).resolve())
+        df = df.drop(columns=['_boot_config'])
         frames.append(df)
     if not frames:
         sys.exit("No capture files given.")
@@ -66,32 +81,16 @@ def heartbeat_rows(df):
     return hb
 
 
-def data_rows(df):
-    tx = df[(df.event == "TX") & (df.type.isin(DATA_TYPES))].copy()
-    outcomes = df[df.event.isin(["ACK", "NOACK"])]
-    labels = []
-    for _, row in tx.iterrows():
-        same = outcomes[(outcomes.file == row.file) & (outcomes.node == row.node) &
-                        (outcomes.origin == row.origin) & (outcomes.id == row.id) &
-                        (outcomes.peer == row.peer) & (outcomes.ms >= row.ms) &
-                        (outcomes.ms <= row.ms + ACK_TIMEOUT_MS)]
-        if len(same):
-            labels.append(SAFE if same.iloc[0].event == "ACK" else DANGER)
-        else:
-            last_ms = df[(df.file == row.file) & (df.node == row.node)].ms.max()
-            labels.append(DANGER if last_ms >= row.ms + ACK_TIMEOUT_MS else None)   # capture ended: unknown
-    tx["label"] = labels
-    tx = tx[tx.label.notna()].copy()
-    tx["label"] = tx.label.astype(int)
-    tx["source"] = "data"
-    tx["link"] = "V" + tx.node.astype(int).astype(str) + "->V" + tx.peer.astype(int).astype(str)
-    return tx
+def data_rows(df, coverage=None):
+    return reconciled_rows(df, coverage)
 
 
 def report(ds):
-    train = ds[ds.source == "heartbeat"]
-    test = ds[ds.source == "data"]
-    print(f"\nRows: {len(ds)}  (heartbeat/training: {len(train)}, data/testing: {len(test)})")
+    train = ds[(ds.source == "data") & (ds.config == "baseline") & ds.label.notna()]
+    heartbeat = ds[ds.source == "heartbeat"]
+    print(f"\nRows: {len(ds)}  (Baseline data/training candidates: {len(train)}, "
+          f"heartbeat/diagnostic: {len(heartbeat)})")
+    print('Data labels require reviewed receiver coverage and unambiguous paired evidence.')
     if len(train):
         print("\nTraining rows per session:")
         per = train.groupby("session").label.agg(rows="count", danger="sum")
@@ -118,31 +117,42 @@ def report(ds):
     if share < MIN_FAIL_SHARE:
         print("  -> add 'weak' or 'far' sessions (node lowered, behind a house, near its range limit).")
     if battery_known < 0.8:
-        print("  -> battery is missing: re-flash with the LiPo build (BATTERY_SOURCE_LIPO) before Test F,")
-        print("     or train without it: python tools\\train_cart.py cart_dataset.csv --features rssi,snr,traffic")
+        print('  -> verify the actual battery sensing path and calibration. A build flag alone does not establish sensing.')
     if all(ok for ok, _ in checks):
-        print("  Enough to train CART.")
+        print("  Source/coverage targets met. Receiver ground-truth checks are still required before final training.")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     parser.add_argument("files", nargs="+", help="capture CSV files (wildcards allowed, e.g. F*.csv)")
     parser.add_argument("--out", default="cart_dataset.csv")
+    parser.add_argument('--coverage', help='Reviewed JSON clock mappings and observation intervals; without it data labels remain unknown')
     args = parser.parse_args()
 
     paths = sorted({p for pattern in args.files for p in (glob.glob(pattern) or [pattern])})
-    paths = [p for p in paths if not p.endswith(Path(args.out).name)]
+    audit_path = Path(args.out).with_name(Path(args.out).stem + '_audit.csv')
+    excluded = {Path(args.out).resolve(), audit_path.resolve()}
+    paths = [p for p in paths if Path(p).resolve() not in excluded]
     df = load(paths)
-
-    ds = pd.concat([heartbeat_rows(df), data_rows(df)], ignore_index=True)
+    coverage = read_coverage(args.coverage)
+    candidates = data_rows(df, coverage)
+    candidates.to_csv(audit_path, index=False)
+    print(f'All data candidates and exclusion reasons: {audit_path}')
+    if len(candidates):
+        print(candidates.outcome_reason.value_counts().to_string())
+    ds = pd.concat([heartbeat_rows(df), candidates[candidates.label.notna()]], ignore_index=True)
     before = len(ds)
     ds = ds[ds.rssi.notna() & ds.snr.notna()].copy()        # no measurement of that link yet
     ds["battery"] = ds.peer_batt_pct                         # neighbour's LiPo %, empty = unknown
     dropped = before - len(ds)
-    ds["peer_traffic"] = ds.peer_traffic.fillna(0)
+    # Unknown traffic is not evidence of an idle neighbour; leave it missing.
     ds["peer_hb_age_ms"] = ds.peer_hb_age_ms.fillna(HB_AGE_CAP_MS).clip(upper=HB_AGE_CAP_MS)
 
-    out = ds[["session", "file", "source", "link", "node", "peer", "event", "ms"] + FEATURES + ["label"]]
+    for name in ('boot', 'attempt', 'frame', 'label_basis', 'outcome', 'outcome_reason', 'receiver_file', 'receiver_ms'):
+        if name not in ds:
+            ds[name] = ''
+    out = ds[["session", "file", "config", "source", "link", "node", "peer", "event", "ms", 'origin', 'id',
+              'boot', 'attempt', 'frame', 'label_basis', 'outcome', 'outcome_reason', 'receiver_file', 'receiver_ms'] + FEATURES + ["label"]]
     out.to_csv(args.out, index=False)
     print(f"Read {len(paths)} file(s). Wrote {len(out)} rows to {args.out}"
           + (f" ({dropped} without RSSI/SNR dropped)" if dropped else ""))

@@ -26,6 +26,15 @@ public:
     bool isFull() const { return currentSize >= MAX_CAPACITY; }
     static size_t capacity() { return MAX_CAPACITY; }
 
+    uint8_t noteFailedHop(uint16_t id, uint8_t originNode) {
+        for (size_t i = 0; i < currentSize; ++i) {
+            if (items[i].id != id || items[i].originNode != originNode) continue;
+            if (items[i].failedHopAttempts < 254) ++items[i].failedHopAttempts;
+            return items[i].failedHopAttempts;
+        }
+        return 255;
+    }
+
     // O(1). Never evicts: a full FIFO rejects the newcomer.
     PushResult push(const EmergencyMessage &incoming, EmergencyMessage & /*evictedOut*/) {
         if (isFull()) return PUSH_REJECTED;

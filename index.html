@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
     <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta http-equiv="X-UA-Compatible" content="ie=edge">
     <title>Emergency Portal - Brgy. San Miguel</title>
     <style>
@@ -77,6 +77,8 @@
         
         /* Priority Group Cards */
         .priority-group {
+            border: 0;
+            min-width: 0;
             display: flex;
             flex-direction: column;
             gap: 7px;
@@ -90,6 +92,8 @@
             transition: all 0.15s ease;
             user-select: none;
         }
+        .priority-card:focus-within { outline: 3px solid #0052cc; outline-offset: 2px; }
+        .priority-card input[type="radio"] { width: 18px; height: 18px; accent-color: #0052cc; flex-shrink: 0; }
         .priority-card.selected-1 {
             border-color: #de350b;
             background-color: #ffebe6;
@@ -269,59 +273,59 @@
     <div class="container">
         <!-- Top Caption & Network Health -->
         <div class="top-bar">
-            Log in to emergency network
-            <strong>Brgy. San Miguel Mini Hub 3</strong>
-            <span class="network-pill">&#9679; LoRa Mesh Active &bull; AES-128-CBC + HMAC-SHA-256</span>
+            Barangay emergency reporting
+            <strong id="nodeIdentity">Brgy. San Miguel emergency node</strong>
+            <span class="network-pill" id="networkStatus" role="status">Checking this node...</span>
         </div>
 
         <!-- Main Header -->
         <h1>Emergency Message</h1>
-        <div class="subtitle">No cellular data &bull; No internet required &bull; Direct LoRa Relay</div>
+        <div class="subtitle">Connect to the barangay node's Wi-Fi to send a report. No internet or mobile data required.</div>
 
         <form id="emergencyForm" onsubmit="submitForm(event)">
             <!-- Community Credential Verification (Anti-Spoofing / Chapter 4.3) -->
             <div class="auth-box">
-                <div class="auth-label">&#128274; Community Passcode / Access Token</div>
-                <input type="text" id="credential" placeholder="Enter barangay passcode (e.g. SANMIGUEL2026)" value="SANMIGUEL2026" autocomplete="off" required>
-                <div class="auth-hint">Reduces network abuse. Default: <b>SANMIGUEL2026</b></div>
+                <label for="credential" class="auth-label">&#128274; Barangay passcode</label>
+                <input type="password" id="credential" placeholder="Enter the barangay passcode" autocomplete="off" required>
+                <div class="auth-hint">Ask the barangay operator for the community passcode.</div>
             </div>
 
             <!-- Section 1: Priority Selection (Dual-Key Min-Heap k=1,2,3) -->
-            <div class="section-title">
-                <span>1. What is this about?</span>
-                <span style="font-size:11px; font-weight:normal; color:#6b778c;">Priority Queue</span>
-            </div>
-            <div class="priority-group" role="radiogroup" aria-label="Priority Selection">
-                <div class="priority-card selected-1" id="card-1" onclick="selectPriority(1)" role="radio" aria-checked="true" tabindex="0">
-                    <div class="priority-title">&#9888;&#65039; [!] MEDICAL SOS (k=1)</div>
-                    <div class="priority-desc">Immediate danger to life &bull; Highest priority queueing</div>
-                </div>
-                <div class="priority-card" id="card-2" onclick="selectPriority(2)" role="radio" aria-checked="false" tabindex="0">
-                    <div class="priority-title">&#9888;&#65039; [/!\] GENERAL EMERGENCY (k=2)</div>
-                    <div class="priority-desc">Needs urgent help, not immediately life-threatening</div>
-                </div>
-                <div class="priority-card" id="card-3" onclick="selectPriority(3)" role="radio" aria-checked="false" tabindex="0">
-                    <div class="priority-title">&#8505;&#65039; [i] ROUTINE / INFO (k=3)</div>
-                    <div class="priority-desc">Non-urgent situation report or status update</div>
-                </div>
-            </div>
+            <fieldset class="priority-group">
+                <legend class="section-title">1. Choose a report category</legend>
+                <div class="auth-hint">Choose one. No category is selected for you.</div>
+                <label class="priority-card" id="card-1" for="priority-1">
+                    <span class="priority-title"><input type="radio" name="priority" id="priority-1" value="1" required onchange="selectPriority(1)"> Medical SOS</span>
+                    <span class="priority-desc">Someone needs immediate medical help, such as severe bleeding or difficulty breathing.</span>
+                </label>
+                <label class="priority-card" id="card-2" for="priority-2">
+                    <span class="priority-title"><input type="radio" name="priority" id="priority-2" value="2" required onchange="selectPriority(2)"> General emergency</span>
+                    <span class="priority-desc">Urgent help with a hazard or other emergency, such as flooding, fire, or a blocked evacuation route.</span>
+                </label>
+                <label class="priority-card" id="card-3" for="priority-3">
+                    <span class="priority-title"><input type="radio" name="priority" id="priority-3" value="3" required onchange="selectPriority(3)"> Routine update</span>
+                    <span class="priority-desc">Information or a situation update that does not need immediate assistance.</span>
+                </label>
+            </fieldset>
 
             <!-- Section 2: Inputs -->
             <div class="section-title">2. Tell us what's happening</div>
             <div class="form-group">
                 <label for="location">Location / Landmark in Brgy. San Miguel</label>
-                <input type="text" id="location" placeholder="Near basketball court, Purok 3, house #42" maxlength="80" oninput="updateByteCount()" autocomplete="off" required>
+                <input type="text" id="location" placeholder="Near basketball court, Purok 3, house #42" aria-describedby="lengthHelp byteCounter lengthStatus" oninput="updateByteCount()" autocomplete="off" required>
             </div>
 
             <div class="form-group">
-                <label for="message">Message (location + message: 200 UTF-8 bytes max)</label>
-                <textarea id="message" placeholder="State the emergency, number of people affected, and immediate assistance needed..." oninput="updateByteCount()" autocomplete="off" required></textarea>
+                <label for="message">What happened and what help is needed?</label>
+                <textarea id="message" placeholder="State the emergency, number of people affected, and immediate assistance needed..." aria-describedby="lengthHelp byteCounter lengthStatus" oninput="updateByteCount()" autocomplete="off" required></textarea>
+                <div class="auth-hint" id="lengthHelp">Keep your report brief. Location allows up to 83 bytes; location and message together allow 200 bytes. Some letters and emoji use more than one byte. Text is never shortened automatically.</div>
                 <div class="byte-counter" id="byteCounter">0 / 200 bytes (location + message)</div>
+                <div id="lengthStatus" class="auth-hint" role="status" aria-live="polite"></div>
             </div>
 
             <!-- Section 3: Status & Connect-Queue-Disconnect -->
-            <div class="section-title">3. Delivery Status</div>
-            <div id="statusBox" class="status-box"></div>
+            <div class="section-title">3. Send your report and save the reference</div>
+            <div id="statusBox" class="status-box" role="status" aria-live="polite" aria-atomic="true"></div>
             
             <button type="button" id="disconnectBtn" class="btn btn-disconnect" onclick="handleDisconnect()">&#10003; I saved my reference — show Wi-Fi steps</button>
 
@@ -330,26 +334,71 @@
             <button type="button" class="btn btn-secondary" onclick="clearForm()">Clear form</button>
         </form>
 
-        <div class="capacity-footer">
-            Wi-Fi supports up to 25 connected devices. After submitting, disconnect from this EMERGENCY-HUB Wi-Fi network in your device's Wi-Fi settings to free your connection slot.
+        <div class="capacity-footer" id="wifiCapacity">
+            Connection capacity has not been confirmed. After saving your message reference, you may disconnect from the node's Wi-Fi.
         </div>
     </div>
 
     <script>
-        var selectedPriority = 1;
+        var selectedPriority = 0;
+        var lastSubmissionLocal = false;
+        var submissionActive = false;
+        var submissionUncertain = false;
+        var lastConfirmedSubmission = null;
         var MAX_BYTES = 200;
+        var MAX_LOCATION_BYTES = 83;
         var encoder = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
+        var nodeInfoRequestActive = false;
+
+        function applyNodeInfo(info) {
+            var roles = { main_hub: 'Main hub', mini_hub: 'Mini hub', edge: 'Edge node' };
+            var states = {
+                ready: 'Radio ready. A route and delivery are not yet confirmed.',
+                paused: 'Radio paused. Outgoing delivery may be delayed or unavailable.',
+                unavailable: 'Radio unavailable. Outgoing radio delivery is unavailable.'
+            };
+            if (!info || !Number.isInteger(info.nodeId) || info.nodeId < 1 || info.nodeId > 6 ||
+                !Object.prototype.hasOwnProperty.call(roles, info.role) ||
+                !Object.prototype.hasOwnProperty.call(states, info.radioState) ||
+                !Number.isInteger(info.maxClients) || info.maxClients < 1 ||
+                !Number.isInteger(info.connectedClients) || info.connectedClients < 0 || info.connectedClients > info.maxClients) {
+                throw new Error('Invalid node operating information');
+            }
+            document.getElementById('nodeIdentity').textContent = 'Brgy. San Miguel - ' + roles[info.role] + ' V' + info.nodeId;
+            document.getElementById('networkStatus').textContent = states[info.radioState];
+            document.getElementById('wifiCapacity').textContent = 'Wi-Fi connections: ' + info.connectedClients + ' of ' + info.maxClients +
+                '. After saving your reference, you may disconnect from this node\'s Wi-Fi to free a connection.';
+        }
+
+        async function refreshNodeInfo() {
+            if (nodeInfoRequestActive) return;
+            nodeInfoRequestActive = true;
+            var controller = new AbortController();
+            var timer = setTimeout(function() { controller.abort(); }, 8000);
+            try {
+                var response = await fetch('/api/node_info', { cache: 'no-store', signal: controller.signal });
+                if (!response.ok) throw new Error('Node information unavailable');
+                applyNodeInfo(await response.json());
+            } catch (error) {
+                document.getElementById('nodeIdentity').textContent = 'Brgy. San Miguel - node identity unavailable';
+                document.getElementById('networkStatus').textContent = 'Node status unavailable. Connect to the Heltec Wi-Fi for live information.';
+                document.getElementById('wifiCapacity').textContent = 'Wi-Fi connection capacity is currently unavailable.';
+            } finally {
+                clearTimeout(timer);
+                nodeInfoRequestActive = false;
+            }
+        }
 
         function selectPriority(val) {
+            if (!Number.isInteger(val) || val < 0 || val > 3) return;
             selectedPriority = val;
             for (var i = 1; i <= 3; i++) {
                 var card = document.getElementById('card-' + i);
+                document.getElementById('priority-' + i).checked = i === val;
                 if (i === val) {
                     card.className = 'priority-card selected-' + i;
-                    card.setAttribute('aria-checked', 'true');
                 } else {
                     card.className = 'priority-card';
-                    card.setAttribute('aria-checked', 'false');
                 }
             }
         }
@@ -364,28 +413,35 @@
 
         // Location and message share one 200-byte budget so that the encrypted
         // LoRa frame always fits the 250-byte MTU (firmware rejects anything larger).
-        function updateByteCount() {
-            var locInput = document.getElementById('location');
-            var msgInput = document.getElementById('message');
-            var locBytes = getUtf8Bytes(locInput.value.trim());
-            var text = msgInput.value;
-            var msgLimit = Math.max(0, MAX_BYTES - locBytes);
-
-            if (getUtf8Bytes(text.trim()) > msgLimit) {
-                while (getUtf8Bytes(text.trim()) > msgLimit && text.length > 0) {
-                    text = text.slice(0, -1);
-                }
-                msgInput.value = text;
+        function reportLengthState() {
+            var loc = document.getElementById('location').value.trim();
+            var msg = document.getElementById('message').value.trim();
+            var locBytes = getUtf8Bytes(loc);
+            var byteLen = locBytes + getUtf8Bytes(msg);
+            var problems = [];
+            if (loc.indexOf('\u0000') !== -1 || msg.indexOf('\u0000') !== -1) {
+                problems.push('Remove the unsupported null character from your report.');
             }
+            if (locBytes > MAX_LOCATION_BYTES) {
+                problems.push('Shorten the location by at least ' + (locBytes - MAX_LOCATION_BYTES) + ' bytes.');
+            }
+            if (byteLen > MAX_BYTES) {
+                problems.push('Shorten the location or message by at least ' + (byteLen - MAX_BYTES) + ' bytes to fit the combined limit.');
+            }
+            return { locationBytes: locBytes, totalBytes: byteLen, error: problems.join(' ') };
+        }
 
-            var byteLen = locBytes + getUtf8Bytes(text.trim());
+        function updateByteCount() {
+            var state = reportLengthState();
             var counterEl = document.getElementById('byteCounter');
-            counterEl.innerText = byteLen + ' / ' + MAX_BYTES + ' bytes (location + message)';
-            if (byteLen >= MAX_BYTES) {
+            counterEl.innerText = state.totalBytes + ' / ' + MAX_BYTES + ' bytes total; location ' + state.locationBytes + ' / ' + MAX_LOCATION_BYTES + ' bytes';
+            document.getElementById('lengthStatus').textContent = state.error;
+            if (state.error) {
                 counterEl.className = 'byte-counter byte-warning';
             } else {
                 counterEl.className = 'byte-counter';
             }
+            return state;
         }
 
         function showStatus(htmlContent, isSuccess) {
@@ -403,17 +459,23 @@
         }
 
         function clearForm() {
+            if (submissionActive) return;
+            if ((submissionUncertain || lastConfirmedSubmission) && !confirm('Save any reference before clearing. Clearing does not cancel a report already accepted by the node. Clear this form?')) return;
             document.getElementById('emergencyForm').reset();
-            document.getElementById('credential').value = "SANMIGUEL2026";
-            selectPriority(1);
+            document.getElementById('credential').value = '';
+            selectPriority(0);
+            lastSubmissionLocal = false;
+            submissionUncertain = false;
+            lastConfirmedSubmission = null;
             updateByteCount();
             document.getElementById('statusBox').style.display = 'none';
             document.getElementById('disconnectBtn').style.display = 'none';
         }
 
         function handleDisconnect() {
+            if (submissionActive || !lastConfirmedSubmission) return;
             var statusBox = document.getElementById('statusBox');
-            statusBox.innerHTML = '<div><b>Your message remains queued at the hub.</b></div><div style="margin-top:4px;">To free your Wi-Fi connection slot, open your device\'s Wi-Fi settings and disconnect from this <b>EMERGENCY-HUB</b> network. This page cannot disconnect the device automatically.</div>';
+            statusBox.innerHTML = lastConfirmedSubmission.html + '<div style="margin-top:4px;">To free your Wi-Fi connection slot, open your device\'s Wi-Fi settings and disconnect from this <b>EMERGENCY-HUB</b> network. This page cannot disconnect the device automatically.</div>';
             statusBox.className = 'status-box status-success';
             statusBox.style.display = 'block';
             document.getElementById('disconnectBtn').style.display = 'none';
@@ -421,19 +483,44 @@
 
         function submitForm(event) {
             event.preventDefault();
+            if (submissionActive) return;
             var sendBtn = document.getElementById('sendBtn');
             var cred = document.getElementById('credential').value.trim();
             var loc = document.getElementById('location').value.trim();
             var msg = document.getElementById('message').value.trim();
 
-            if (cred !== "SANMIGUEL2026") {
-                showStatus('&#10007; <b>Invalid Community Passcode:</b> Please use the designated barangay passcode (SANMIGUEL2026).', false);
+            if (selectedPriority < 1 || selectedPriority > 3) {
+                showStatus('Please choose a report category before sending.', false);
                 return;
             }
-            if (!loc || !msg) return;
 
+            if (!cred) {
+                showStatus('Please enter the community passcode provided by the barangay operator.', false);
+                return;
+            }
+            if (!loc || !msg) {
+                showStatus('Please enter both a location and a message.', false);
+                return;
+            }
+            var lengthState = updateByteCount();
+            if (lengthState.error) {
+                showStatus(lengthState.error + ' Your text has been kept. Edit it before sending.', false);
+                return;
+            }
+
+            var fingerprint = JSON.stringify([selectedPriority, loc, msg]);
+            if (lastConfirmedSubmission && lastConfirmedSubmission.fingerprint === fingerprint) {
+                showStatus(lastConfirmedSubmission.html + '<div>This report was already accepted. Use Clear form for a new report.</div>', true);
+                return;
+            }
+            if (submissionUncertain && !confirm('The previous request may already have been accepted, even though its reply was lost. Sending again may create another report. Check with the operator if possible. Send anyway?')) return;
+
+            submissionActive = true;
             sendBtn.disabled = true;
-            sendBtn.innerText = "ENCRYPTING & TRANSMITTING...";
+            sendBtn.innerText = 'SENDING TO THIS NODE...';
+            showStatus('<div><b>Sending to this node...</b></div><div>Please wait for a reference number. This does not yet confirm delivery to the main hub.</div>', false);
+            var controller = new AbortController();
+            var timer = setTimeout(function() { controller.abort(); }, 10000);
 
             var nowMs = Date.now();
             var payload = {
@@ -445,10 +532,11 @@
                 timestamp_ms: nowMs % 1000
             };
 
-            fetch('/api/submit', {
+            return fetch('/api/submit', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
+                body: JSON.stringify(payload),
+                signal: controller.signal
             })
             .then(function(res) {
                 return res.text().then(function(body) {
@@ -460,7 +548,9 @@
                         if (res.status === 404 || res.status === 405) {
                             throw new Error('No message submission backend is available here (HTTP ' + res.status + '). Live Server is only serving the mock page; no message was sent.');
                         }
-                        throw new Error((data && data.message) || ('HTTP ' + res.status));
+                        var rejection = new Error((data && data.message) || ('HTTP ' + res.status));
+                        rejection.explicitRejection = data && data.status === 'error';
+                        throw rejection;
                     }
                     if (!data || typeof data !== 'object') {
                         throw new Error('The server returned an invalid response. The message was not confirmed.');
@@ -469,33 +559,45 @@
                 });
             })
             .then(function(data) {
-                if (data.status !== 'queued' || !data.ref) {
-                    throw new Error('The hub did not confirm that your message was queued. Please try again.');
+                if ((data.status !== 'queued' && data.status !== 'delivered_local') ||
+                    typeof data.ref !== 'string' || !/^V[1-6]#[0-9]{1,5}$/.test(data.ref) ||
+                    !Number.isInteger(data.priority) || data.priority < 1 || data.priority > 3) {
+                    throw new Error('The node returned an incomplete confirmation.');
                 }
                 var ref = data.ref;
-                var priorityLabel = selectedPriority === 1 ? "MEDICAL SOS (k=1)" : (selectedPriority === 2 ? "GENERAL EMERGENCY (k=2)" : "ROUTINE/INFO (k=3)");
+                var acceptedPriority = Number(data.priority);
+                var priorityLabel = acceptedPriority === 1 ? 'Medical SOS' : (acceptedPriority === 2 ? 'General emergency' : 'Routine update');
+                var locallyDelivered = data.status === 'delivered_local';
+                lastSubmissionLocal = locallyDelivered;
                 
-                var successHtml = '<div>&#10003; <b>Accepted and queued at the hub</b></div>' +
+                var successHtml = '<div>&#10003; <b>' + (locallyDelivered ? 'Recorded at the main hub' : 'Accepted by this node for sending') + '</b></div>' +
                                   '<div style="margin-top:3px;">Ref# <b>' + ref + '</b> &bull; Priority: <b>' + priorityLabel + '</b></div>' +
-                                  '<div class="disconnect-notice">Your message is encrypted and waiting in the hub queue. This confirms queueing only; it does not confirm radio delivery. Please save your reference number.</div>';
+                                  '<div class="disconnect-notice">' + (locallyDelivered ? 'Your report is recorded on this main hub. No radio transmission was needed.' : 'Your message is waiting to be sent to the main hub. Arrival there is not yet confirmed.') + ' Please save your reference number.</div>';
 
                 showStatus(successHtml, true);
-                sendBtn.disabled = false;
-                sendBtn.innerText = "SEND EMERGENCY MESSAGE";
+                lastConfirmedSubmission = { fingerprint: fingerprint, html: successHtml };
+                submissionUncertain = false;
             })
             .catch(function(err) {
-                console.log("[Preview/submission error]", err, payload);
-                var message = (err instanceof TypeError)
-                    ? 'Could not reach a message submission service. If you opened this with Live Server, it is a static mock and does not send messages.'
+                console.warn("Submission could not be confirmed.");
+                submissionUncertain = submissionUncertain || !err.explicitRejection;
+                var message = err && err.name === 'AbortError' ? 'The node did not reply within 10 seconds.' : (err instanceof TypeError)
+                    ? 'The connection was interrupted or the node could not be reached.'
                     : ((err && err.message) ? err.message : 'The hub could not be reached.');
                 message = message.replace(/[&<>"']/g, function(ch) {
                     return {'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[ch];
                 });
-                showStatus('<div>&#10007; <b>Message not confirmed</b></div><div>' + message + '</div><div style="margin-top:4px;">Do not assume the hub received it. Check your connection and try again. Preview mode does not submit messages.</div>', false);
+                showStatus('<div>&#10007; <b>' + (submissionUncertain ? 'Acceptance unknown' : 'Report not accepted') + '</b></div><div>' + message + '</div><div style="margin-top:4px;">' + (submissionUncertain ? 'The node may already have accepted this report. No automatic retry was made. Check with the operator if possible; sending again may create another report.' : 'Your text is preserved. Correct the problem, then send again.') + '</div>' + (lastConfirmedSubmission ? '<hr>' + lastConfirmedSubmission.html : ''), false);
+            })
+            .finally(function() {
+                clearTimeout(timer);
+                submissionActive = false;
                 sendBtn.disabled = false;
                 sendBtn.innerText = "SEND EMERGENCY MESSAGE";
             });
         }
+        refreshNodeInfo();
+        setInterval(refreshNodeInfo, 15000);
     </script>
 </body>
 </html>

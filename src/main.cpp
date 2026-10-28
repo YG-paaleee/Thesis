@@ -22,6 +22,9 @@
 #include "packet_codec.h"
 #include "link_state.h"
 #include "fifo_queue.h"
+#include "delivery_policy.h"
+#include "report_pagination.h"
+#include "static_web_page.h"
 
 // ---------------------------------------------------------------------------
 // Experimental configuration (Section 4.2.1). Set per build in platformio.ini
@@ -96,7 +99,9 @@ AsyncWebServer server(80);
 MessageQueue priorityQueue;
 SemaphoreHandle_t priorityQueueMutex = nullptr;
 SemaphoreHandle_t liveIncidentMutex = nullptr;
-constexpr size_t LIVE_INCIDENT_CAPACITY = 20;   // data messages only (heartbeats never stored)
+constexpr size_t LIVE_INCIDENT_CAPACITY = NODE_ID_CFG == 1 ? 200 : 20;
+constexpr size_t INCIDENT_PAGE_SIZE = 20;
+uint32_t hubHistorySession = 0; // New token each boot; RAM history is not persistent.
 
 struct LiveIncident {
     uint16_t messageId;
@@ -194,7 +199,10 @@ constexpr uint8_t MAC_MAX_CAD_RETRIES = 6;
 // heartbeat Link-State Updates (link_state.h), not from this table.
 // Set USE_TOPOLOGY_MASK = false in the field to let any measured link be used.
 // ---------------------------------------------------------------------------
-constexpr bool USE_TOPOLOGY_MASK = true;
+#ifndef USE_TOPOLOGY_MASK_CFG
+#define USE_TOPOLOGY_MASK_CFG 1
+#endif
+constexpr bool USE_TOPOLOGY_MASK = USE_TOPOLOGY_MASK_CFG != 0;
 constexpr uint32_t LINK_STALE_MS = 95000UL;      // no frame from a neighbour for ~3 heartbeats -> no edge
 constexpr uint32_t LSDB_MAX_AGE_MS = 300000UL;   // a node's row whose sequence stops advancing for 5 min ages out
 
@@ -228,6 +236,8 @@ uint8_t radioTxNextHop = 0;
 size_t radioTxPacketLen = 0;
 uint32_t radioAckDeadlineMs = 0;
 uint32_t radioTxStartedAtMs = 0;
+uint32_t dataAttemptCounter = 0;
+uint32_t activeDataAttempt = 0;
 EmergencyMessage activeTxMessage{};
 uint8_t macBackoffExponent = MAC_MIN_BACKOFF_EXPONENT;
 uint8_t macBusyRetries = 0;
@@ -307,7 +317,7 @@ void resetMacBackoff();
 //     peer_queue,peer_hb_age_ms,self_batt_pct,self_used_mah,mac_retries,bytes,queue_len,dtn_len,
 //     ahead,bypassed,cart_pf,cart_class,heur_class,wait_ms,queue_index,d_buffer_ms,detail
 //   ms      this node's uptime (millis)       node   node that wrote the row
-//   event   NEW | TX | RX | ACK | NOACK | DELIVER | DUP | STORE | EVICT | DROP | LINK |
+//   event   NEW | ENQUEUE | TX | RX | ACK | NOACK | DELIVER | DUP | STORE | EVICT | DROP | LINK |
 //           HB_OK | HB_MISS (CART training labels: expected heartbeat from peer arrived / lost;
 //           id = that heartbeat's sequence, peer_hb_age_ms = age when it was due) |
 //           FORWARD (a message left the DTN buffer, acknowledged by the next hop) | CONFIG | TIME |
@@ -357,6 +367,8 @@ struct CsvEvent {
     bool hasPeerAge;      // log peerAgeMs instead of "now - last heartbeat"
     uint32_t peerAgeMs;
     const char *detail;
+    bool hasEventTime;    // queue admission / TX start, before serial logging delay
+    uint32_t eventMs;
 };
 CsvEvent csvEvent(const char *event, uint8_t origin, uint16_t id, uint8_t k, uint8_t type, uint8_t peer);
 CsvEvent csvEvent(const char *event, const EmergencyMessage &message, uint8_t peer);
@@ -391,6 +403,17 @@ bool queuePush(const EmergencyMessage &msg) {
     }
     EmergencyMessage evicted{};
     const MessageQueue::PushResult result = priorityQueue.push(msg, evicted);
+    if (result != MessageQueue::PUSH_REJECTED) {
+        // Log accepted insertion before releasing the queue: a sender must not
+        // select this message before its queue-entry evidence is emitted.
+        // RX includes overheard/duplicate frames; NEW also includes local V1
+        // deliveries, so neither event establishes a queue entry.
+        CsvEvent entered = csvEvent("ENQUEUE", msg, 0);
+        entered.hasEventTime = true;
+        entered.eventMs = millis();
+        entered.detail = "accepted";
+        logCsv(entered);
+    }
     xSemaphoreGive(priorityQueueMutex);
 
     if (result == MessageQueue::PUSH_EVICTED) {
@@ -445,6 +468,7 @@ void buildIncidentPath(uint8_t originNode, uint16_t relayPath, char *path, size_
     if (!path || pathSize == 0) return;
     path[0] = '\0';
     appendPathNode(path, pathSize, originNode);
+    if (originNode == NODE_ID && relayPath == 0) return; // locally accepted hub report
     for (uint8_t slot = 0; slot < RELAY_PATH_SLOTS; slot++) {
         const uint8_t relay = relayPathAt(relayPath, slot);
         if (relay == 0) break;
@@ -490,18 +514,18 @@ int32_t calculateIncidentLatencyMs(uint32_t transmittedAtSeconds, uint16_t trans
     return elapsedMs <= INT32_MAX ? (int32_t)elapsedMs : -1;
 }
 
-void recordLiveIncident(uint16_t messageId, uint8_t priority, uint8_t packetType,
+bool recordLiveIncident(uint16_t messageId, uint8_t priority, uint8_t packetType,
                         uint8_t originNode, uint16_t relayPath, uint32_t transmittedAtSeconds,
                         uint16_t transmittedAtMs, const char *location, const char *message) {
     if (!liveIncidentMutex ||
-        xSemaphoreTake(liveIncidentMutex, pdMS_TO_TICKS(100)) != pdTRUE) return;
+        xSemaphoreTake(liveIncidentMutex, pdMS_TO_TICKS(100)) != pdTRUE) return false;
 
     LiveIncident &incident = liveIncidents[liveIncidentWriteIndex];
     incident.messageId = messageId;
     incident.priority = priority;
     incident.packetType = packetType;
     incident.originNode = originNode;
-    incident.latencyMs = calculateIncidentLatencyMs(transmittedAtSeconds, transmittedAtMs);
+    incident.latencyMs = originNode == NODE_ID ? -1 : calculateIncidentLatencyMs(transmittedAtSeconds, transmittedAtMs);
     incident.receivedAtMs = millis();
     incident.arrivalNo = ++liveIncidentArrivalCounter;
     buildIncidentPath(originNode, relayPath, incident.path, sizeof(incident.path));
@@ -511,6 +535,7 @@ void recordLiveIncident(uint16_t messageId, uint8_t priority, uint8_t packetType
     liveIncidentWriteIndex = (liveIncidentWriteIndex + 1) % LIVE_INCIDENT_CAPACITY;
     if (liveIncidentCount < LIVE_INCIDENT_CAPACITY) liveIncidentCount++;
     xSemaphoreGive(liveIncidentMutex);
+    return true;
 }
 
 bool serializeLoRaPacket(const EmergencyMessage &msg, uint8_t nextHopNode,
@@ -934,8 +959,10 @@ void printCsvHeader() {
                    "wait_ms,queue_index,d_buffer_ms,detail");
 }
 
-static char csvLine[200];
+static char csvLine[384];
 static size_t csvUsed = 0;
+static uint32_t csvSequence = 0;
+static uint32_t csvBootId = 0;
 
 static void append(const char *format, ...) {
     if (csvUsed >= sizeof(csvLine) - 1) return;
@@ -951,10 +978,12 @@ SemaphoreHandle_t csvLogMutex = nullptr;
 
 void logCsv(const CsvEvent &e) {
     // Rows come from the radio loop and the web-server task: serialize them.
+    // Allocate before taking the mutex so missing events leave a detectable gap.
+    const uint32_t sequence = __atomic_add_fetch(&csvSequence, 1, __ATOMIC_RELAXED);
     if (csvLogMutex && xSemaphoreTake(csvLogMutex, pdMS_TO_TICKS(50)) != pdTRUE) return;
     csvUsed = 0;
 
-    const uint32_t now = millis();
+    const uint32_t now = e.hasEventTime ? e.eventMs : millis();
     append("CSV,%lu,%u,%s,%u,%u,%u,%u,", (unsigned long)now, NODE_ID, e.event,
            e.origin, e.id, e.k, e.type);
     if (e.peer) append("%u,", e.peer); else append(",");
@@ -995,10 +1024,27 @@ void logCsv(const CsvEvent &e) {
     if (e.waitMs >= 0) append("%ld,", (long)e.waitMs); else append(",");
     if (e.queueIndex >= 0) append("%d,", e.queueIndex); else append(",");
     if (e.dBufferMs >= 0) append("%ld,", (long)e.dBufferMs); else append(",");
-    append("%s\n", e.detail ? e.detail : "");
+    append("%s;boot=%08lx;seq=%lu\n", e.detail ? e.detail : "",
+           (unsigned long)csvBootId, (unsigned long)sequence);
     if (csvUsed > 0 && csvLine[csvUsed - 1] != '\n') csvLine[csvUsed - 1] = '\n';   // truncated row
     Serial.write((const uint8_t *)csvLine, csvUsed);   // one write per row keeps rows intact
     if (csvLogMutex) xSemaphoreGive(csvLogMutex);
+}
+
+// The frame tag fingerprints the exact authenticated bytes without logging text.
+// Identical retries may share a fingerprint; the dataset builder must still use
+// non-overlapping time windows and must not invent a wire-level attempt number.
+void logReceiverOutcome(const char *event, uint8_t origin, uint16_t id, uint8_t priority,
+                        uint8_t type, uint8_t sender, const uint8_t *packet,
+                        size_t packetLen, const char *reason) {
+    char tag[FRAME_AUTH_TAG_SIZE * 2 + 1];
+    for (size_t i = 0; i < FRAME_AUTH_TAG_SIZE; ++i)
+        snprintf(tag + i * 2, 3, "%02x", packet[packetLen - FRAME_AUTH_TAG_SIZE + i]);
+    char detail[112];
+    snprintf(detail, sizeof(detail), "frame=%s;reason=%s", tag, reason);
+    CsvEvent e = csvEvent(event, origin, id, priority, type, sender);
+    e.detail = detail;
+    logCsv(e);
 }
 
 // --- Seen-List access (used from the radio loop and the web handler task) ---
@@ -1112,10 +1158,8 @@ void transmitHeartbeat(uint32_t now) {
     }
 }
 
-void forgetAttempts(const EmergencyMessage &message);
 
 void completeDataAcknowledgment() {
-    forgetAttempts(activeTxMessage);
     if (radioTxFromDtn && activeTxMessage.dtnStoredAtMs) {
         // C16: the message leaves DTN custody; d_buffer = time it was held (Section 4.5.2).
         const uint32_t heldMs = millis() - activeTxMessage.dtnStoredAtMs;
@@ -1344,6 +1388,8 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
         CsvEvent e = csvEvent("DUP", originNode, messageId, priority, packetType, sourceNode);
         e.detail = "re_ack";
         logCsv(e);
+        logReceiverOutcome("RX_ACCEPT", originNode, messageId, priority, packetType,
+                           sourceNode, packet, packetLen, "duplicate");
         startLinkAck(sourceNode, originNode, messageId);
         return;
     }
@@ -1357,6 +1403,8 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
         CsvEvent e = csvEvent("DROP", originNode, messageId, priority, packetType, sourceNode);
         e.detail = "decrypt_fail";
         logCsv(e);
+        logReceiverOutcome("RX_REJECT", originNode, messageId, priority, packetType,
+                           sourceNode, packet, packetLen, "decrypt_fail");
         return;
     }
 
@@ -1370,6 +1418,8 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
         CsvEvent e = csvEvent("DROP", originNode, messageId, priority, packetType, sourceNode);
         e.detail = "bad_body";
         logCsv(e);
+        logReceiverOutcome("RX_REJECT", originNode, messageId, priority, packetType,
+                           sourceNode, packet, packetLen, "bad_body");
         return;
     }
     memset(plaintext, 0, sizeof(plaintext));   // decrypted copy no longer needed
@@ -1397,6 +1447,8 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
         e.detail = detail;
         logCsv(e);
         seenListAdd(originNode, messageId);
+        logReceiverOutcome("RX_ACCEPT", originNode, messageId, priority, packetType,
+                           sourceNode, packet, packetLen, "delivered");
         startLinkAck(sourceNode, originNode, messageId);
         return;
     }
@@ -1408,6 +1460,8 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
         CsvEvent e = csvEvent("DROP", originNode, messageId, priority, packetType, sourceNode);
         e.detail = "ttl";
         logCsv(e);
+        logReceiverOutcome("RX_REJECT", originNode, messageId, priority, packetType,
+                           sourceNode, packet, packetLen, "ttl");
         return;
     }
 
@@ -1431,9 +1485,13 @@ void handleReceivedPacket(const uint8_t *packet, size_t packetLen, float rssi, f
 
     if (!queuePush(forwarded)) {
         Serial.printf("[LORA RX] Forward queue full; packet V%u#%04u was not acknowledged.\n", originNode, messageId);
+        logReceiverOutcome("RX_REJECT", originNode, messageId, priority, packetType,
+                           sourceNode, packet, packetLen, "queue_full");
         return;
     }
     seenListAdd(originNode, messageId);
+    logReceiverOutcome("RX_ACCEPT", originNode, messageId, priority, packetType,
+                       sourceNode, packet, packetLen, "queued");
     startLinkAck(sourceNode, originNode, messageId);
 }
 
@@ -1588,11 +1646,17 @@ NeighborVerdict classifyNeighbor(uint8_t node, uint32_t now) {
     v.known = true;
     const uint32_t ageMs = (uint32_t)(now - n.lastHeardMs);
     const bool batteryKnown = n.batteryPermille != BATTERY_UNKNOWN;
-    const float batteryPct = batteryKnown ? n.batteryPermille / 10.0f : 100.0f;   // unknown: no battery penalty
+    const float batteryPct = batteryKnown ? n.batteryPermille / 10.0f : 0.0f;
     v.heurRisky = n.rssi <= HEURISTIC_MIN_RSSI_DBM || n.snr <= HEURISTIC_MIN_SNR_DB ||
                   ageMs > HEURISTIC_MAX_HEARTBEAT_AGE_MS ||
                   (batteryKnown && batteryPct < HEURISTIC_MIN_BATTERY_PCT);
 #if CART_MODEL_AVAILABLE
+#ifdef CART_USES_BATTERY
+    // Training excludes missing battery features. Do not substitute a healthy
+    // battery during inference: leave Pf unavailable and the CART log blank.
+    // The heuristic verdict above still uses its existing unknown-battery rule.
+    if (!batteryKnown) return v;
+#endif
     float x[CART_FEATURE_COUNT] = {};
 #ifdef CART_USES_RSSI
     x[CART_F_RSSI] = n.rssi;
@@ -1757,31 +1821,15 @@ bool storeInDtn(const EmergencyMessage &original, uint32_t now) {
 // routeExists=false -> long poll; true -> short retry.
 // Without DTN (Configs 1-3): failed hops per message, so a message is dropped
 // after NO_DTN_MAX_ATTEMPTS tries instead of being held.
-struct HopAttempts { uint8_t origin; uint16_t id; uint8_t count; };
-HopAttempts hopAttempts[8] = {};
-
 uint8_t countFailedAttempt(const EmergencyMessage &message) {
-    HopAttempts *slot = nullptr;
-    for (HopAttempts &a : hopAttempts) {
-        if (a.count && a.origin == message.originNode && a.id == message.id) { slot = &a; break; }
-    }
-    if (!slot) {
-        for (HopAttempts &a : hopAttempts) if (!a.count) { slot = &a; break; }
-        if (!slot) slot = &hopAttempts[esp_random() % 8];
-        *slot = HopAttempts{message.originNode, message.id, 0};
-    }
-    return ++slot->count;
-}
-
-void forgetAttempts(const EmergencyMessage &message) {
-    for (HopAttempts &a : hopAttempts) {
-        if (a.count && a.origin == message.originNode && a.id == message.id) a.count = 0;
-    }
+    if (!priorityQueueMutex || xSemaphoreTake(priorityQueueMutex, pdMS_TO_TICKS(1000)) != pdTRUE) return 0;
+    const uint8_t attempts = priorityQueue.noteFailedHop(message.id, message.originNode);
+    xSemaphoreGive(priorityQueueMutex);
+    return attempts;
 }
 
 void dropWithoutDtn(const EmergencyMessage &message, const char *reason) {
     queueRemoveById(message.id, message.originNode);
-    forgetAttempts(message);
     Serial.printf("[DROP] Packet V%u#%04u dropped (%s; DTN off in this configuration).\n",
                   message.originNode, message.id, reason);
     CsvEvent e = csvEvent("DROP", message, 0);
@@ -1792,11 +1840,19 @@ void dropWithoutDtn(const EmergencyMessage &message, const char *reason) {
 void deferUnsentMessage(const EmergencyMessage &message, bool fromDtn, bool routeExists, uint32_t now) {
     if (!DTN_ENABLED) {
         // "Drop on link failure" (Table 4.1, Configs 1-3): no store-and-forward.
-        if (!routeExists) {
+        const uint8_t attempts = routeExists ? countFailedAttempt(message) : 0;
+        const NoDtnAction action = noDtnFailureAction(routeExists, attempts, NO_DTN_MAX_ATTEMPTS);
+        if (action == NoDtnAction::AlreadyRemoved) return;
+        if (action == NoDtnAction::DropNoRoute) {
             dropWithoutDtn(message, "no_route");
-        } else if (countFailedAttempt(message) >= NO_DTN_MAX_ATTEMPTS) {
+        } else if (action == NoDtnAction::DropLimit) {
             dropWithoutDtn(message, "retries_exhausted");
         } else {
+            char detail[64];
+            snprintf(detail, sizeof(detail), "failed_hops=%u;limit=%u", attempts, NO_DTN_MAX_ATTEMPTS);
+            CsvEvent retry = csvEvent("RETRY", message, 0);
+            retry.detail = detail;
+            logCsv(retry);
             nextMacAttemptAt = now + shortRetryDelayMs();   // stays in the queue, retried shortly
         }
         return;
@@ -1819,9 +1875,10 @@ void retainUnacknowledgedMessage(uint32_t now) {
     const bool routeExists = selectNextHop(activeTxMessage, alternateHop, now);
     Serial.printf("[LORA TX] No ACK from V%u for packet V%u#%04u; %s.\n",
                   radioTxNextHop, activeTxMessage.originNode, activeTxMessage.id,
-                  routeExists ? "will retry shortly" : "holding in DTN");
+                  DTN_ENABLED ? (routeExists ? "will retry shortly" : "holding in DTN")
+                              : (routeExists ? "bounded retry policy" : "dropping: no route, DTN disabled"));
     CsvEvent e = csvEvent("NOACK", activeTxMessage, radioTxNextHop);
-    e.detail = routeExists ? "retry" : "hold";
+    e.detail = DTN_ENABLED ? (routeExists ? "retry" : "hold") : (routeExists ? "bounded_retry" : "drop_no_route");
     logCsv(e);
     radioAwaitingAck = false;
     resetMacBackoff();
@@ -1957,6 +2014,11 @@ void serviceRadioMac() {
             return;
         }
         if (finishState == RADIOLIB_ERR_NONE) {
+            char detail[48];
+            snprintf(detail, sizeof(detail), "attempt=%lu;status=ok", (unsigned long)activeDataAttempt);
+            CsvEvent completion = csvEvent("TX_DONE", activeTxMessage, radioTxNextHop);
+            completion.detail = detail;
+            logCsv(completion);
             radio.startReceive();
             radioAwaitingAck = true;
             const uint32_t ackAirTimeMs = (uint32_t)(radio.getTimeOnAir(ACK_PACKET_SIZE) / 1000);
@@ -1966,6 +2028,11 @@ void serviceRadioMac() {
         } else {
             Serial.printf("[LORA TX] Completion error %d for packet V%u#%04u; retaining it in DTN.\n",
                           finishState, radioTxOriginNode, radioTxMessageId);
+            char detail[64];
+            snprintf(detail, sizeof(detail), "attempt=%lu;error=%d", (unsigned long)activeDataAttempt, finishState);
+            CsvEvent completion = csvEvent("TX_ERROR", activeTxMessage, radioTxNextHop);
+            completion.detail = detail;
+            logCsv(completion);
             radio.startReceive();
             radioAwaitingAck = true;
             radioAckDeadlineMs = millis();
@@ -2093,6 +2160,9 @@ void serviceRadioMac() {
                           msg.originNode, msg.id, nextHopNode, staticHop);
         }
 
+        // Freeze both predictions before this data transmission. In Baseline
+        // they are shadow observations only: the route is already selected.
+        const NeighborVerdict verdict = classifyNeighbor(nextHopNode, millis());
         radioTxDone = false;
         radioTxMessageId = msg.id;
         radioTxOriginNode = msg.originNode;
@@ -2104,13 +2174,15 @@ void serviceRadioMac() {
         if (txState == RADIOLIB_ERR_NONE) {
             radioTxInFlight = true;
             radioTxStartedAtMs = millis();
+            activeDataAttempt = ++dataAttemptCounter;
             markRadioTx(true);
             Serial.printf("[LORA TX] Started packet V%u#%04u to V%u, %u bytes, header 0x%02X.\n",
                           msg.originNode, msg.id, nextHopNode, (unsigned int)packetLen, radioPacket[0]);
             // Feature row for relay viability: peer telemetry at decision time;
             // the matching ACK / NOACK row for the same origin,id,peer is the label.
             CsvEvent e = csvEvent("TX", msg, nextHopNode);
-            const NeighborVerdict verdict = classifyNeighbor(nextHopNode, millis());   // C10: log both verdicts
+            e.hasEventTime = true;
+            e.eventMs = radioTxStartedAtMs;
             const uint32_t waited = takeMacWait(msg);
             e.waitMs = waited > INT32_MAX ? INT32_MAX : (int32_t)waited;
             e.queueIndex = msg.queuePosAtEntry;
@@ -2121,9 +2193,12 @@ void serviceRadioMac() {
             e.macRetries = macBusyRetries;
             e.bytes = (uint16_t)packetLen;
             fillQueueState(e, msg);
-            char detail[40];
-            snprintf(detail, sizeof(detail), "%s%s;cost=%u", fromDtn ? "dtn" : "queue",
-                     rerouted ? ";reroute" : "", routeCost);
+            char frameTag[FRAME_AUTH_TAG_SIZE * 2 + 1];
+            for (size_t i = 0; i < FRAME_AUTH_TAG_SIZE; ++i)
+                snprintf(frameTag + i * 2, 3, "%02x", radioPacket[packetLen - FRAME_AUTH_TAG_SIZE + i]);
+            char detail[128];
+            snprintf(detail, sizeof(detail), "%s%s;cost=%u;attempt=%lu;frame=%s", fromDtn ? "dtn" : "queue",
+                     rerouted ? ";reroute" : "", routeCost, (unsigned long)activeDataAttempt, frameTag);
             e.detail = detail;
             logCsv(e);
         } else {
@@ -2153,7 +2228,7 @@ void serviceRadioMac() {
 // (automated traffic for field tests and CART data collection).
 // timestampTx/timestampMs = creation time (Unix s + ms); timestampTx 0 = use this node's clock.
 // ---------------------------------------------------------------------------
-enum SubmitResult : uint8_t { SUBMIT_OK, SUBMIT_BAD_SIZE, SUBMIT_ENCRYPT_FAILED, SUBMIT_QUEUE_FULL };
+enum SubmitResult : uint8_t { SUBMIT_OK, SUBMIT_BAD_SIZE, SUBMIT_ENCRYPT_FAILED, SUBMIT_QUEUE_FULL, SUBMIT_HUB_BUSY };
 
 SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, uint16_t timestampMs, const char *location,
                               const char *message, const char *via, EmergencyMessage &msg) {
@@ -2212,8 +2287,13 @@ SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, uint16_t t
     }
     msg.encryptedLen = (uint8_t)encLen;
 
-    // Insert into Dual-Key Binary Min-Heap Priority Queue (Section 3.2)
-    if (!queuePush(msg)) {
+    // V1 is the destination: accept it locally without waiting for a radio slot.
+    const bool localDelivery = NODE_ID == HUB_NODE_ID;
+    if (localDelivery && !recordLiveIncident(msg.id, msg.priority, msg.packetType, msg.originNode,
+                                            0, msg.timestamp_tx, msg.timestamp_ms, msg.location, msg.payload)) {
+        return SUBMIT_HUB_BUSY;
+    }
+    if (!localDelivery && !queuePush(msg)) {
         Serial.println("[ERROR] Priority queue is full; submission rejected.");
         return SUBMIT_QUEUE_FULL;
     }
@@ -2227,6 +2307,15 @@ SubmitResult submitOwnMessage(uint8_t priority, uint32_t timestampTx, uint16_t t
         e.bytes = (uint16_t)(msg.encryptedLen + FRAME_OVERHEAD_SIZE);
         e.detail = detail;
         logCsv(e);
+    }
+
+    if (localDelivery) {
+        CsvEvent delivered = csvEvent("DELIVER", msg, 0);
+        delivered.detail = "local;route=1";
+        logCsv(delivered);
+        Serial.printf("[LOCAL] Delivered report V%u#%04u at this hub; no radio transmission required.\n",
+                      msg.originNode, msg.id);
+        return SUBMIT_OK;
     }
 
     // Serial Telemetry Output
@@ -2270,29 +2359,128 @@ void collectSubmitBody(AsyncWebServerRequest *request, uint8_t *data, size_t len
     if (index + len > body->received) body->received = index + len;
 }
 
+char adminPassword[65] = {};
+portMUX_TYPE adminAccessMux = portMUX_INITIALIZER_UNLOCKED;
+
+bool validAdminPassword(const char *password) {
+    const size_t length = strlen(password);
+    if (length < 12 || length > 64) return false;
+    for (size_t i = 0; i < length; ++i)
+        if ((unsigned char)password[i] < 33 || (unsigned char)password[i] > 126) return false;
+    return true;
+}
+
+void loadAdminAccess() {
+    Preferences preferences;
+    if (!preferences.begin("web-access", true)) return;
+    const String saved = preferences.getString("admin-pass", "");
+    preferences.end();
+    if (validAdminPassword(saved.c_str())) saved.toCharArray(adminPassword, sizeof(adminPassword));
+}
+
+bool authorizeAdmin(AsyncWebServerRequest *request) {
+    if (NODE_ID != HUB_NODE_ID) {
+        request->send(404, "application/json", "{\"error\":\"Administration is available only on the main hub.\"}");
+        return false;
+    }
+    char password[sizeof(adminPassword)];
+    portENTER_CRITICAL(&adminAccessMux);
+    memcpy(password, adminPassword, sizeof(password));
+    portEXIT_CRITICAL(&adminAccessMux);
+    if (!password[0]) {
+        request->send(503, "application/json", "{\"error\":\"Admin access is not configured. Ask the operator to set it through USB.\"}");
+        return false;
+    }
+    const bool authenticated = request->authenticate("admin", password);
+    memset(password, 0, sizeof(password));
+    if (!authenticated) request->requestAuthentication("Barangay administration");
+    return authenticated;
+}
+
+void setAdminPassword(const char *password) {
+    if (NODE_ID != HUB_NODE_ID) {
+        Serial.println("[ADMIN] Configure access on V1 only.");
+        return;
+    }
+    if (!validAdminPassword(password)) {
+        Serial.println("[ADMIN] Use 12-64 printable characters with no spaces. No change made.");
+        return;
+    }
+    Preferences preferences;
+    if (!preferences.begin("web-access", false)) {
+        Serial.println("[ADMIN] Could not open credential storage. No change made.");
+        return;
+    }
+    const bool saved = preferences.putString("admin-pass", password) > 0;
+    preferences.end();
+    if (!saved) {
+        Serial.println("[ADMIN] Could not save credentials. No change made.");
+        return;
+    }
+    portENTER_CRITICAL(&adminAccessMux);
+    snprintf(adminPassword, sizeof(adminPassword), "%s", password);
+    portEXIT_CRITICAL(&adminAccessMux);
+    Serial.println("[ADMIN] Password saved. Sign in as admin. The password is not printed in logs.");
+}
+
 void setupWebServerRoutes() {
     // 1. Captive Portal UI (Root)
     server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send_P(200, "text/html", CAPTIVE_PORTAL_HTML);
+        sendStaticWebPage(request, CAPTIVE_PORTAL_HTML);
+    });
+
+    // Public operating information only: no credentials or report contents.
+    server.on("/api/node_info", HTTP_GET, [](AsyncWebServerRequest *request) {
+        JsonDocument document;
+        document["nodeId"] = NODE_ID;
+        document["role"] = NODE_ID == HUB_NODE_ID ? "main_hub" : (NODE_ID == 6 ? "edge" : "mini_hub");
+        document["ssid"] = AP_SSID;
+        document["radioState"] = !radioReady ? "unavailable" : (radioSilent ? "paused" : "ready");
+        document["maxClients"] = MAX_AP_CLIENTS;
+        document["connectedClients"] = WiFi.softAPgetStationNum();
+        AsyncResponseStream *response = request->beginResponseStream("application/json");
+        response->addHeader("Cache-Control", "no-store");
+        serializeJson(document, *response);
+        request->send(response);
     });
 
     // 2. Admin / Main Hub Dashboard (Stationary Hub V1 at Barangay Hall)
     server.on("/admin", HTTP_GET, [](AsyncWebServerRequest *request) {
-        request->send_P(200, "text/html", ADMIN_DASHBOARD_HTML);
+        if (!authorizeAdmin(request)) return;
+        sendStaticWebPage(request, ADMIN_DASHBOARD_HTML);
     });
 
     server.on("/api/live_incidents", HTTP_GET, [](AsyncWebServerRequest *request) {
+        if (!authorizeAdmin(request)) return;
+        uint32_t page = 1, snapshot = 0, session = 0;
+        if ((request->hasParam("page") && !parseHistoryNumber(request->getParam("page")->value().c_str(), page)) ||
+            (request->hasParam("snapshot") && !parseHistoryNumber(request->getParam("snapshot")->value().c_str(), snapshot)) ||
+            (request->hasParam("session") && !parseHistoryNumber(request->getParam("session")->value().c_str(), session))) {
+            request->send(400, "application/json", "{\"error\":\"Invalid history parameters\"}"); return;
+        }
+        if (request->hasParam("snapshot") && (!request->hasParam("session") || session != hubHistorySession)) {
+            request->send(409, "application/json", "{\"error\":\"Hub session changed. Return to latest reports.\"}"); return;
+        }
         if (!liveIncidentMutex ||
             xSemaphoreTake(liveIncidentMutex, pdMS_TO_TICKS(100)) != pdTRUE) {
             request->send(503, "application/json", "{\"error\":\"Incident buffer busy\"}");
             return;
         }
 
+        ReportPage selection;
+        const auto pageResult = planReportPage(liveIncidentArrivalCounter, LIVE_INCIDENT_CAPACITY,
+                                               INCIDENT_PAGE_SIZE, page, snapshot, selection);
+        if (pageResult != ReportPageResult::Ok) {
+            xSemaphoreGive(liveIncidentMutex);
+            request->send(pageResult == ReportPageResult::ExpiredSnapshot ? 409 : 400, "application/json",
+                          "{\"error\":\"History page unavailable or expired. Return to latest reports.\"}");
+            return;
+        }
         JsonDocument document;
         JsonArray incidents = document.to<JsonArray>();
         const size_t oldestIndex = (liveIncidentWriteIndex + LIVE_INCIDENT_CAPACITY -
                                     liveIncidentCount) % LIVE_INCIDENT_CAPACITY;
-        for (size_t i = 0; i < liveIncidentCount; i++) {
+        for (size_t i = selection.offset; i < selection.offset + selection.length; i++) {
             const LiveIncident &incident = liveIncidents[(oldestIndex + i) % LIVE_INCIDENT_CAPACITY];
             JsonObject row = incidents.add<JsonObject>();
             row["id"] = incident.messageId;
@@ -2301,19 +2489,32 @@ void setupWebServerRoutes() {
             row["originNode"] = incident.originNode;
             char originLabel[5];
             snprintf(originLabel, sizeof(originLabel), "V%u", incident.originNode);
-            row["origin"] = originLabel;
-            row["route"] = incident.path;
+            row["origin"] = String(originLabel);
+            row["route"] = String(incident.path);
             if (incident.latencyMs >= 0) row["latencyMs"] = incident.latencyMs;
             else row["latencyMs"] = nullptr;
-            row["location"] = incident.location;
-            row["message"] = incident.message;
+            row["location"] = String(incident.location);
+            row["message"] = String(incident.message);
             row["crypto"] = "AES-128-CBC + HMAC-SHA-256/128";
             row["rxTime"] = incident.receivedAtMs;
             row["arrival"] = incident.arrivalNo;
         }
+        const uint32_t recordedSinceBoot = liveIncidentArrivalCounter;
         xSemaphoreGive(liveIncidentMutex);
+        if (document.overflowed()) {
+            request->send(503, "application/json", "{\"error\":\"Not enough memory to read history page. Try again.\"}");
+            return;
+        }
 
         AsyncResponseStream *response = request->beginResponseStream("application/json");
+        response->addHeader("Cache-Control", "no-store");
+        response->addHeader("X-Recent-Limit", String((unsigned int)INCIDENT_PAGE_SIZE));
+        response->addHeader("X-History-Capacity", String((unsigned int)LIVE_INCIDENT_CAPACITY));
+        response->addHeader("X-History-Retained", String((unsigned int)selection.retained));
+        response->addHeader("X-History-Pages", String((unsigned int)selection.pages));
+        response->addHeader("X-History-Snapshot", String((unsigned long)selection.snapshot));
+        response->addHeader("X-Hub-Session", String((unsigned long)hubHistorySession));
+        response->addHeader("X-Recorded-Since-Boot", String((unsigned long)recordedSinceBoot));
         serializeJson(document, *response);
         request->send(response);
     });
@@ -2354,7 +2555,7 @@ void setupWebServerRoutes() {
                 request->send(403, "application/json", "{\"status\":\"error\",\"message\":\"Invalid Community Passcode. Access Denied.\"}");
                 return;
             }
-            if (!radioReady) {
+            if (!radioReady && NODE_ID != HUB_NODE_ID) {
                 request->send(503, "application/json", "{\"status\":\"error\",\"message\":\"LoRa radio is unavailable. Message was not queued.\"}");
                 return;
             }
@@ -2372,10 +2573,11 @@ void setupWebServerRoutes() {
             EmergencyMessage msg{};
             const SubmitResult result = submitOwnMessage(priority, phoneTs, phoneTsMs, location, message, "web", msg);
             if (result == SUBMIT_BAD_SIZE) {
-                char errorJson[160];
+                char errorJson[240];
                 snprintf(errorJson, sizeof(errorJson),
-                         "{\"status\":\"error\",\"message\":\"Location and message together must be 1-%u bytes (got %u).\"}",
-                         (unsigned int)MAX_TEXT_BYTES, (unsigned int)(strlen(location) + strlen(message)));
+                         "{\"status\":\"error\",\"message\":\"Message must not be empty. Location allows up to %u bytes; location and message together allow %u bytes. Received %u location bytes and %u total bytes.\"}",
+                         (unsigned int)(sizeof(EmergencyMessage::location) - 1), (unsigned int)MAX_TEXT_BYTES,
+                         (unsigned int)strlen(location), (unsigned int)(strlen(location) + strlen(message)));
                 request->send(413, "application/json", errorJson);
                 return;
             }
@@ -2387,11 +2589,16 @@ void setupWebServerRoutes() {
                 request->send(503, "application/json", "{\"status\":\"error\",\"message\":\"The message queue is full. Please try again shortly.\"}");
                 return;
             }
+            if (result == SUBMIT_HUB_BUSY) {
+                request->send(503, "application/json", "{\"status\":\"error\",\"message\":\"The hub could not record this report. Please try again shortly.\"}");
+                return;
+            }
 
             // Step F: Immediate JSON Response with Connect-Queue-Disconnect Header
-            char responseJson[96];
-            snprintf(responseJson, sizeof(responseJson), "{\"status\":\"queued\",\"ref\":\"V%u#%04u\",\"priority\":%u,\"queueSize\":%u}",
-                     msg.originNode, msg.id, msg.priority, (unsigned int)queueSize());
+            char responseJson[128];
+            snprintf(responseJson, sizeof(responseJson), "{\"status\":\"%s\",\"ref\":\"V%u#%04u\",\"priority\":%u,\"queueSize\":%u}",
+                     NODE_ID == HUB_NODE_ID ? "delivered_local" : "queued", msg.originNode, msg.id,
+                     msg.priority, (unsigned int)queueSize());
 
             AsyncWebServerResponse *response = request->beginResponse(200, "application/json", responseJson);
             response->addHeader("Connection", "close"); // Instruct client to close connection to free socket
@@ -2541,6 +2748,8 @@ void handleSerialCommand(const char *command) {
         printNodeStatus();
     } else if (!strcmp(command, "routes")) {
         printRoutingTable();
+    } else if (!strncmp(command, "admin password ", 15)) {
+        setAdminPassword(command + 15);
     } else if (!strncmp(command, "battery cal ", 12)) {
         if (BATTERY_SOURCE == BATTERY_SOURCE_LIPO) handleBatteryCalibration(command + 12);
         else Serial.println("[BATTERY] Calibration needs BATTERY_SOURCE_LIPO.");
@@ -2551,6 +2760,20 @@ void handleSerialCommand(const char *command) {
     } else if (BATTERY_SOURCE == BATTERY_SOURCE_ESTIMATE &&
                (!strcmp(command, "energy") || !strncmp(command, "energy ", 7))) {
         handleEnergyCommand(command[6] ? command + 7 : "");
+    } else if (!strncmp(command, "clock ", 6)) {
+        // USB-only timing probe. The CLOCK CSV row's local ms is sampled by
+        // logCsv between the laptop's request and receipt timestamps. This
+        // measures an interval; it does not set a clock or transmit over LoRa.
+        const char *token = command + 6;
+        if (strlen(token) != 16 || strspn(token, "0123456789abcdef") != 16) {
+            Serial.println("[CMD] Usage: clock <16 lowercase hexadecimal characters>");
+            return;
+        }
+        char detail[32];
+        snprintf(detail, sizeof(detail), "probe=%s", token);
+        CsvEvent e = csvEvent("CLOCK", 0, 0, 0, 0, 0);
+        e.detail = detail;
+        logCsv(e);
     } else if (!strncmp(command, "time ", 5)) {
         // Sets this node's real-time clock: "time <unix-seconds>[.milliseconds]".
         // tools/capture_telemetry.py sends it (with ms) to every node it connects to.
@@ -2579,7 +2802,7 @@ void handleSerialCommand(const char *command) {
         handleSosCommand(command + 4);
     } else if (command[0] != '\0') {
         Serial.println("[CMD] Commands: silent on | silent off | status | routes | battery | battery cal <volts> | "
-                       "time <unix-seconds>[.ms] | "
+                       "time <unix-seconds>[.ms] | clock <16 hex characters> | admin password <new password> | "
                        "sos <k 1-3> [location|]<message>");
     }
 }
@@ -2618,8 +2841,11 @@ void applyRadioSilence() {
 }
 
 void setup() {
+    hubHistorySession = esp_random();
     Serial.begin(115200);
+    csvBootId = esp_random();
     delay(1500);
+    loadAdminAccess();
     detectBatteryControlPolarity();   // before anything drives GPIO37
     if (BATTERY_SOURCE == BATTERY_SOURCE_LIPO) batteryLoadCalibration();
     linkStateDb.begin(NODE_ID);
@@ -2711,10 +2937,15 @@ void setup() {
     Serial.println("[STATUS] Ready for Emergency Message Intake & Security Processing.");
     printCsvHeader();
     {
-        char detail[64];
-        snprintf(detail, sizeof(detail), "cfg=%s;queue=%s;dtn=%d;filter=%s;cart=%d", CONFIG_NAME_CFG,
+        char detail[192];
+#if CART_MODEL_AVAILABLE && defined(CART_MODEL_ID)
+        const char *modelId = CART_MODEL_ID;
+#else
+        const char *modelId = "unavailable";
+#endif
+        snprintf(detail, sizeof(detail), "cfg=%s;queue=%s;dtn=%d;filter=%s;cart=%d;model=%s", CONFIG_NAME_CFG,
                  QUEUE_MODE_CFG == QUEUE_FIFO ? "fifo" : "heap", DTN_ENABLED ? 1 : 0, relayFilterName(),
-                 CART_MODEL_AVAILABLE);
+                 CART_MODEL_AVAILABLE, modelId);
         CsvEvent e = csvEvent("CONFIG", 0, 0, 0, 0, 0);
         e.detail = detail;
         logCsv(e);

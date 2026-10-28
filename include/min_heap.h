@@ -30,6 +30,7 @@ struct EmergencyMessage {
     // Logging only (CSV, Section 4.5.2 / 4.7):
     uint8_t  queuePosAtEntry; // messages that would be sent before this one when it entered the queue
     uint32_t dtnStoredAtMs;   // millis() when it entered the DTN buffer (0 = never)
+    uint8_t failedHopAttempts; // local no-DTN failure count; never carried on air
 };
 
 // Queue order (Section 3.2, extended): primary = priority k (1 = most urgent),
@@ -139,6 +140,17 @@ public:
     }
 
     static size_t capacity() { return MAX_CAPACITY; }
+
+    // Update only the stored failure count; preserve queue arrival/order keys.
+    // 255 means the message left the queue while its transmission was in flight.
+    uint8_t noteFailedHop(uint16_t id, uint8_t originNode) {
+        for (size_t i = 0; i < currentSize; ++i) {
+            if (heap[i].id != id || heap[i].originNode != originNode) continue;
+            if (heap[i].failedHopAttempts < 254) ++heap[i].failedHopAttempts;
+            return heap[i].failedHopAttempts;
+        }
+        return 255;
+    }
 
     // PQA support: compares every other waiting message with m.
     //  ahead    = waiting messages that should leave before m (outrank it).

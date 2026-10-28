@@ -1,0 +1,5 @@
+# Verified direct dependencies for capture/analysis on 28 October 2026.
+pyserial==3.5
+pandas==3.0.1
+scipy==1.18.1
+scikit-posthocs==0.17.1

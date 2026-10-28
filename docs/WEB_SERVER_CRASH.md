@@ -1,0 +1,36 @@
+# Web response crash and required V1/V6 retest
+
+## Evidence and diagnosis
+
+The supplied `range_10m_20261027_173949_raw.log` records a Core 1 LoadProhibited panic with EXCVADDR 0 and an automatic V1 reboot. The logged ELF SHA prefix `c66dab8bb9aaf033` matches the saved baseline-n1 ELF's full SHA256 `c66dab8bb9aaf0336005b12aeab2890418bd37a69f6499ffed853e908acabcfe`. The matching pre-fix ELF and BIN were preserved under `Documents/Firmware Crash Evidence/2026-10-27` relative to the thesis root.
+
+Decoded addresses lead through `String::move`, `String::operator=(String&&)`, `AsyncBasicResponse::_respond`, and the root-page handler at the pre-fix main.cpp line 2408. In the installed ESPAsyncWebServer 3.1.5, the char-pointer `send_P` wrapper delegates to the String overload and ultimately creates an AsyncBasicResponse when no template callback is supplied. It copies the whole HTML body into RAM and constructs substrings while sending. The recorded null read is consistent with that path encountering a failed String allocation; no runtime heap trace was captured, so an exact allocation/headroom threshold has not been measured.
+
+## Change
+
+Both root and authenticated admin routes now call `sendStaticWebPage`. Its explicit uint8_t buffer plus exact-length overload creates AsyncProgmemResponse. The page stays in static flash, each response has its own read offset and the library fills transport-sized buffers. No template callback is supplied, preserving literal CSS percentages and scripts. UTF-8 HTML content type and no-store are explicit. Admin authentication is still checked before its page is served. No library-cache files, dependencies, radio parameters or credentials were changed.
+
+The regression test executes the installed library's actual response factories and flash-buffer reader with both generated HTML pages. It checks repeated complete byte-for-byte reads at 1/1460/4096-byte chunk sizes, independent concurrent reader offsets, content type, cache policy, and that no AsyncBasicResponse is constructed. Network and Arduino types are host stubs: passing this test is not a physical load-test result.
+
+## Hardware retest — required before a distance survey
+
+1. Stop captures and serial monitors before flashing. For this two-node V6–V1 test, flash V6 with `survey-n6` and V1 with `survey-n1`. The normal Baseline builds enforce the planned topology, which excludes the direct V6–V1 link. Use each board's confirmed current COM port. Keep antennas attached. Do not erase flash/NVS merely to apply this fix.
+2. Keep V1 and V6 stationary at close distance; turn V2–V5 off. Start a fresh V1 USB capture with `--no-time-sync --expected-node 1 --expected-config range-survey` and a `close-retest` session. Keep all generated files and note the actual distance, heights and power sources.
+3. On a laptop connected to V1 Wi-Fi, open the direct root URL and authenticated admin page, then reload each five times with roughly five seconds between reloads. On the phone connected to V6 Wi-Fi, open and reload the resident page five times. Confirm pages finish loading. If a board restarts, a page fails, or the logger reports a problem, stop and preserve the evidence.
+4. From the V6 phone send Routine update reports with location `Close retest` and messages `Close test 01`, `Close test 02`, `Close test 03`, spaced 30 seconds apart. Save each reference and submission status. Do not repeatedly retry an uncertain submission.
+5. Wait two minutes after the third attempt, then stop capture. Confirm all three exact V6 references have `Delivered packet ... at V1` and CSV DELIVER evidence. Confirm the dashboard also shows them. A queued response or heartbeats alone do not establish delivery.
+6. Check the full capture for `Guru Meditation`, `LoadProhibited`, `Backtrace`, `Rebooting` and changes in boot tokens. A failed attempt invalidates a claimed three-of-three pass; diagnose it before continuing the survey. V1-only logs cannot exclude an unseen V6 reboot, so capture V6 too when a second USB recorder is available or investigate any observed phone reconnection/page failure.
+
+The three-report receiver test has now passed as recorded below. The user also confirmed all three reports are visible on the V1 dashboard. This small engineering test does not establish long-duration reliability or exclude an unobserved V6 restart.
+
+## Execution status — 2026-10-27
+
+**Latest result: three of three delivered.** V1's survey_close_20261027_193122_raw.log contains one DELIVER and one RX_ACCEPT for each of V6#30200, V6#30201 and V6#30202, with texts Survey check 01–03, priority 3 and route 6-1. V1 retains boot token 1ddb3d2a and has no panic/backtrace/reboot markers through more than two minutes after the last delivery. Capture stopped after inspection. Repeated page loads were reported successful by the user before this retest; the user subsequently confirmed all three reports are visible on the V1 dashboard. The close-distance delivery/dashboard check passed. No end-to-end latency is inferred from the receiver-only unsynchronized log. Earlier entries below describe intermediate states, not outstanding uploads or missing deliveries in this successful retest.
+
+V1 survey-n1 upload subsequently succeeded after serial identity verification, with flash hashes verified. Postflash V1 reports all measured links and a V1–V6 edge of weight 1. Both survey boards are updated. V1 USB capture `survey_close_20261027_193122` started for the repeated three-report test; delivery acceptance remains pending.
+
+Survey build validation: both survey builds passed and the real LinkStateDb/Dijkstra host regression passed. V6 identity was rechecked before uploading survey-n6; flash hashes verified. Its postflash routing table now shows `all measured links` and `Route to hub V1: next hop V1, total cost 1`. V1 survey upload and repeated three-report delivery remain pending.
+
+User reported repeated page loads succeeded. V1's `close_three_reports_20261027_1850_raw.log` contains one boot token and no panic/reboot markers, but none of V6#35622–35624 were delivered. V6's USB diagnostic then showed an authenticated V1 heartbeat and measured weight 1, while its graph excluded V1 and reported no route. The enabled planned topology mask excludes V6–V1; this is a confirmed blocker for the two-node survey. It does not prove whether each earlier report was dropped for that reason because their sender logs were not captured. Dedicated `survey-n1`/`survey-n6` builds disable only that mask, retain FIFO/no-DTN/no-filter policy and identify themselves as `range-survey`. Formal builds retain the mask. Three-report delivery must be repeated after updating the survey boards.
+
+Host regression passed; baseline-n1 and baseline-n6 builds passed. COM4 returned `[STATUS] V1` during the pre-flash identity check. baseline-n1 was uploaded on COM4 successfully; esptool verified the flash hashes and restarted the board. After the user connected V6, COM4 returned `[STATUS] V6`; baseline-n6 was uploaded successfully with flash hashes verified and a restart. Both boards now have the flash-response fix. Page stability and the three numbered deliveries are still pending; do not record these as passed.

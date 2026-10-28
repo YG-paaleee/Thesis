@@ -1,300 +1,361 @@
-# Field Test Plan — LoRa Mesh (Brgy. San Miguel)
+# Field Test Plan - LoRa Mesh, Barangay San Miguel
 
-Exported from the team's live Claude doc on Oct 13, 2026. The doc is the version to edit; this copy travels with the code.
+Updated 22 October 2026. This procedure is maintained with the firmware.
+Run commands from the folder containing `platformio.ini` (`Code/Thesis`).
+COM ports below are examples: replace them with the node-to-port map.
 
-Run six tests in order: range, site check, multi-hop, failover, priority, then CART data collection. Tests A–E take about 4–5 hours with the full team, and Test F about 3 hours, so F can go on a second day. Each test builds on the one before: range tells you where nodes can go, the site check confirms the planned links, and only then are delivery, failover and training-data results meaningful.
+### Two-node V1–V6 distance survey (27 October update)
 
-## Before you go
+Use `survey-n1` and `survey-n6`, not the formal Baseline builds, for a direct
+V1–V6 survey with the other four boards off. The planned topology excludes this
+direct link, even when heartbeats are received. Survey builds permit measured
+links and report configuration `range-survey`; FIFO/no-DTN/no-filter behaviour
+is retained. Formal experiment builds still enforce the planned topology.
+Use `--expected-config range-survey` when capturing survey firmware. First verify
+three unique V6 reports at V1 at close distance, then conduct the distance survey.
+Keep these engineering results separate from formal Baseline training sessions.
 
-All six boards must run the same build, and every power bank must be full, before you leave.
+## 1. Separate the three stages
 
-1. **Re-flash all six to the new build.** It adds the `sos` serial command and the heartbeat labels (`HB_OK` / `HB_MISS`) that Test F needs, and gives the paper one firmware version. Plug in **one board at a time**; with a single board connected PlatformIO finds its port on its own. In the PlatformIO terminal, in the project folder:
+1. **Engineering checks:** range, placement, portal, routing, buffering and queue behaviour.
+2. **Training-data collection:** Baseline data packets with pre-decision neighbour features and sender/receiver logs.
+3. **Independent evaluation:** frozen model and firmware; five configurations, three tiers, ten trials per tier/configuration.
 
-   ```
-   pio run -e node1 -t upload      # V1 plugged in alone
-   pio run -e node2 -t upload      # unplug V1, plug in V2
-   pio run -e node3 -t upload      # V3
-   pio run -e node4 -t upload      # V4
-   pio run -e node5 -t upload      # V5
-   pio run -e node6 -t upload      # V6
-   ```
+Do not train or tune on the independent evaluation sessions. Site checks can proceed
+while unresolved measurement features are being completed, but cannot substitute for
+protocol-complete training/evaluation data.
 
-   If more than one board is plugged in, add its port, e.g. `pio run -e node3 -t upload --upload-port COM5` (`pio device list` shows ports). Check each one: `pio device monitor -p COM5`, press RST, look for `[STATUS] Node V3 (EMERGENCY-HUB-03)`, then Ctrl+C. Label each board.
+### Readiness requirements
 
-   **Bench check of the new `sos` command:** with V1 on its power bank and V6 on the laptop, type `sos 1 Bench|hello` in V6's monitor. You should see `EMERGENCY MESSAGE ACCEPTED & QUEUED (via serial)`, then an `ACK` within about a minute, and the message on V1's dashboard.
-2. **Charge every power bank to 100%,** plus one spare.
-3. **Mark the planned positions on a map** (V1 at the barangay hall, then V2–V6). Planned links: V1–V2, V1–V3, V1–V4, V2–V4, V2–V5, V3–V5, V3–V6, V5–V6.
-4. **Check the laptop:** `pip install pyserial pandas` done; `tools\capture_telemetry.py`, `tools\analyze_run.py` and `tools\build_cart_dataset.py` present.
+- **Battery sensing (part e) remains unresolved.** The actual setup is a 3.7 V,
+  2000 mAh KC18650 Li-ion battery with Battery Shield V3, connected through a
+  switched USB extension and USB-A-to-USB-C cable to the Heltec USB-C port.
+  The firmware reads the Heltec VBAT circuit; this does not measure the shield cell
+  through USB. Verify a sensing arrangement before battery-feature collection.
+  Do not describe this setup as a directly connected LiPo/JST battery.
+- **Ground truth (task 28):** the dataset builder currently uses ACK/NOACK outcomes.
+  Implement intended-receiver reconciliation and the confirmed-loss, delayed-delivery,
+  logger-failure and missing-evidence categories before final training. A missing ACK
+  alone does not prove that the receiver missed the data packet.
+- **Classifier ground truth (task 26, revised 27 October):** use new independent
+  Baseline shadow sessions after model freeze, with paired receiver outcomes.
+  No outcomes are assigned to untried avoided links. See docs/AVOIDED_LINK_EVALUATION.md.
+- **Threshold tuning (task 27):** align tied-F1 selection with the paper's higher-recall
+  rule before freezing the model. The current script prefers proximity to 0.5.
+- **Statistics (task 13, software prepared 28 October):** significant eligible
+  Kruskal-Wallis tests now lead to tie-corrected Dunn-Bonferroni comparisons of
+  all ten formal configuration pairs within each metric/tier. Tests/statuses are
+  saved separately. McNemar requires the independent Baseline plan and reviewed
+  receiver outcomes. Physical verification, metric validity and sampling-design
+  review remain pending. See docs/STATISTICAL_ANALYSIS.md.
 
-**What to bring**
+## 2. Flash configuration-specific builds
 
-- [ ] 6 nodes with antennas attached, 6 full power banks + 1 spare
-- [ ] Laptops (charged) and their chargers. One is enough for every test. One USB-C data cable per laptop, plus a spare.
-- [ ] A stick or pole to hold nodes about 1.5–2 m high, tape, the weatherproof enclosures
-- [ ] 2–3 phones; mobile data OFF while sending through a node's Wi-Fi (calls still work)
-- [ ] This log sheet (on a phone) or a notebook, a pen
-- [ ] Umbrella or plastic bags in case of rain
+Every node in a run must use the same configuration, with its own node ID:
 
-## Team roles
-
-Four jobs; with nine members, put two people on each and rotate. Keep a phone call or group chat open between the hub and the field team the whole time.
-
-| Role | Stays where | Does |
-| --- | --- | --- |
-| Hub operator | At V1 (barangay hall) with the laptop | Runs the serial monitor or capture, keeps the dashboard open, reads out what arrives |
-| Walker / sender | Moves around | Carries a node or goes to a node, sends test messages from a phone, reads out the Ref# |
-| Recorder | With the walker | Fills the log sheet: time, place, GPS, line of sight, Ref#, result |
-| Node crew | At the node positions | Places nodes high and vertical, unplugs and replugs power banks in Test D |
-
-## Test A — Range survey (about 60–90 min)
-
-Find how far two nodes can reliably talk in your barangay, so you know where the others can go. Only **V1** and **V3** are on; the other four stay **off**, so nothing else is in the air.
-
-**Setup**
-
-1. V1 at the barangay hall on the laptop, antenna vertical, raised about 1.5–2 m, not next to metal.
-2. The hub operator starts a monitor that timestamps and saves every line:
-   - `pio device monitor -p COM8 -f time -f log2file -f send_on_enter`
-   - The log file appears in the project folder as `platformio-device-monitor-….log`.
-3. The walker carries V3 on its power bank, held high and vertical, away from the body.
-
-**At each stop** (about 50, 100, 200, 300, 400, 500, 700, 1000 m from the hub — Google Maps' "Measure distance" gives the distance):
-
-1. Stand still with V3 raised for **2 minutes** (about 4 heartbeats).
-2. Connect a phone to `EMERGENCY-HUB-03` and send one **Medical SOS** with the location set to the stop, e.g. `A-STOP4 300m`. Note the Ref# the phone shows.
-3. The recorder writes the time, GPS or landmark, distance, and whether you can see the hall (line of sight).
-4. The hub operator reads out the newest `[HB RX] V3 rssi=… snr=…` line and whether the SOS arrived; the recorder writes both down.
-
-**When to stop:** two stops in a row where the hub hears **no V3 heartbeat** in 2 minutes. The last stop that worked is the range in that direction. Walk back: any SOS that could not get through is held on V3 and should arrive once you are back in range — note when.
-
-If time allows, repeat in a second direction with different surroundings (open road vs. houses).
-
-**What good looks like:** RSSI falls as you walk away. SF12 still decodes down to about −130 dBm and −20 dB SNR; once SNR drops below about −10 dB, treat the link as marginal. For deployment, place linked nodes where RSSI is about −90 to −110 dBm with SNR ≥ 0 dB (roughly ½ to ⅔ of the range found here).
-
-## Test B — Site check at the planned positions (about 30–45 min)
-
-Confirm every planned link works where the nodes will actually stand, all from the hub's laptop.
-
-1. The node crew places all six nodes at their planned positions (use Test A's range as a guide), raised and vertical, then switches them on.
-2. Wait **10 minutes.** Heartbeats need a few rounds to spread every node's link-state row to the hub.
-3. The hub operator types `routes` in V1's monitor and takes a screenshot. The matrix shows each planned link's measured weight:
-
-| Weight in the matrix | Meaning | Action |
-| --- | --- | --- |
-| 1–5 | Strong link | Keep |
-| 6–15 | Usable but weaker | Keep; note it |
-| 16 or more | Marginal | Raise or move one of the two nodes a little closer |
-| 255 on a planned link | Not heard, or no update yet | Wait 5 more minutes; still 255 → move one of the two nodes |
-
-4. Fix any 255 link, wait 5 minutes, and run `routes` again until all eight planned links show a number.
-5. Write each final position (GPS, height, landmark) in the log sheet; these become the deployment positions for Tests C–F and for the paper.
-
-A node hearing a node it is **not** planned to link with is fine. The topology mask keeps routing on the planned links (the matrix shows 255 there).
-
-## Test C — Multi-hop delivery and heartbeats (about 45 min)
-
-Send SOS messages from every node to the hub and record whether, how fast and by which route each one arrives.
-
-**At the hub**
-
-1. Close the monitor (Ctrl+C), then start the capture. It also sets V1's clock, so the dashboard's latency column works:
-   - `python tools\capture_telemetry.py COM8 --out fieldC.csv`
-2. Connect the laptop's Wi-Fi to `EMERGENCY-HUB-01` and open `http://192.168.4.1/admin`, sorted by "Arrival order".
-
-**In the field** (start with the farthest node, V6, then V5, V4, V3, V2)
-
-1. Stand near the node, connect a phone to its Wi-Fi (`EMERGENCY-HUB-0N`), and send **3 Medical SOS**, 1 minute apart. Put the node and the try number in the location, e.g. `C-V6-1`.
-2. Write down each Ref# (e.g. `V6#16771`) and the time sent.
-3. The hub operator reads back each arrival: Ref#, route (e.g. `V6 -> V5 -> V2 -> V1`) and latency.
-
-**Expected:** every message arrives; routes follow the lowest-weight path from Test B's matrix; two hops usually take 10–30 s. One lost hop adds a retry of about 15–30 s, which is normal.
-
-**Afterwards:** stop the capture (Ctrl+C). PDR = Ref#s delivered ÷ Ref#s sent, from the log sheet and the dashboard. `analyze_run.py` cannot count PDR here, because only V1 is on the laptop and it never sees the senders' "NEW" rows. The heartbeats V1 heard are in `fieldC.csv` as `RX` rows with `heartbeat` in the last column.
-
-## Test D — Dead relay, reroute and store-and-forward (about 30 min)
-
-Kill relays on purpose and check that messages take another route, or wait and get delivered once a relay comes back. Keep the capture and dashboard from Test C running. "Kill" a node by **unplugging its power bank**, never its antenna.
-
-**D1 — Reroute**
-
-1. From Test C, note V6's normal route, e.g. `V6 -> V3 -> V1`. The middle node (here V3) is the relay to kill.
-2. Unplug that relay's power bank. Note the time.
-3. Send 1 SOS from V6 (`D1-dead`). Expected: after two missed ACKs (about 15–30 s) it reroutes; the dashboard shows the other path, e.g. `V6 -> V5 -> V2 -> V1`.
-4. Plug the relay back in and wait 2 minutes, then send 1 more SOS (`D1-back`). Expected: it uses the normal route again.
-
-**D2 — Store-and-forward (no route at all)**
-
-1. Unplug **both** of V6's neighbours (V3 and V5). Note the time.
-2. Send 1 SOS from V6 (`D2-held`). Expected: it does **not** arrive; V6 holds it and retries every 10–60 s.
-3. Wait 2 minutes, then plug **V5** back in. Note the time.
-4. Expected: the message arrives within about 1–2 minutes of V5 starting, via `V6 -> V5 -> V2 -> V1`. Record the arrival time; the held time is the gap between sending and arriving.
-5. Plug V3 back in.
-
-## Test E — Priority order (about 15 min)
-
-Check that a Medical SOS overtakes less urgent messages queued at the same node.
-
-1. At V6, send three messages as fast as you can, in this order: **Routine (k=3)**, **General (k=2)**, **Medical SOS (k=1)**. Label them `E1-k3`, `E1-k2`, `E1-k1`.
-2. On the dashboard (sorted by "Arrival order"), read the Arrival # of each.
-3. Repeat 3 times (`E2-…`, `E3-…`).
-
-**Expected arrival order:** k=3 first (it was already being sent, and a transmission is never interrupted), then **k=1**, then k=2. If k=1 arrives before k=2, the priority queue worked. k=1 arriving first of all is also correct; it means k=3 had not started yet.
-
-## Test F — CART training data from heartbeats (about 3 hours, one laptop)
-
-The training data comes from the heartbeats every node already sends every 30 s, so nobody needs to send messages. Each heartbeat carries a sequence number. The node the laptop is plugged into checks every heartbeat it expects from each neighbour and writes one row:
-
-- **`HB_OK`**: it arrived (label 1).
-- **`HB_MISS`**: it never came (label 0). Detected from a gap in the numbers (#41, then #43), or from a neighbour going silent.
-
-Each row also holds what the node knew about that link just *before* the heartbeat was due: RSSI, SNR, the neighbour's traffic, and the heartbeat age. These are the four CART features. With 3 neighbours, the laptop node collects about **120 labels per 20 minutes**.
-
-**Targets:** at least **300 labels** (aim for 600 or more), at least **20% HB_MISS**, at least **6 sessions**, from at least 3 different laptop positions so many links are covered. Most misses come from the weak, far and neighbour-lost sessions; normal sessions give mostly HB_OK.
-
-**Before you start**
-
-1. All six boards run the newest build (with heartbeat labels). Check: a node's monitor shows `HB_OK` rows about 30 s after its neighbours start.
-2. Place all six nodes at their Test B positions, on power banks, switched on.
-3. **No messages are needed.** Only send SOS from phones in the "busy" session.
-
-**Each session (20 minutes)**
-
-1. Go to the session's node with the laptop. Swap its power bank for the laptop's USB cable; the node restarts, which is fine.
-2. Start recording. Name the session after the laptop node and the condition:
-
-   ```
-   python tools\capture_telemetry.py COM8 --session F1-V1-normal --out F1-V1-normal.csv
-   ```
-
-3. Set up the condition from the table below, then leave it alone for **20 minutes**. The counter shows labels and the failure share as they come in.
-4. Ctrl+C to stop (the file is saved). Fill in the session log, put the power bank back, and move to the next session.
-5. After every 2–3 sessions, run the check. It says what is still short:
-
-   ```
-   python tools\build_cart_dataset.py F*.csv
-   ```
-
-**Sessions**
-
-| Session | Laptop at | Links recorded | Condition | How |
+| Configuration | Build environments | Queue | Relay assessment | DTN |
 | --- | --- | --- | --- | --- |
-| F1 | V1 | V2, V3, V4 → V1 | normal | As deployed |
-| F2 | V5 | V2, V3, V6 → V5 | normal | As deployed |
-| F3 | V3 | V1, V5, V6 → V3 | normal | As deployed |
-| F4 | V1 | V2, V3, V4 → V1 | weak | Put V1 (with the laptop) on the ground, or just inside a building |
-| F5 | V5 | V2, V3, V6 → V5 | weak | Same as F4, at V5 |
-| F6 | V3 | V1, V5, V6 → V3 | far | Carry V3 and the laptop 100–200 m away from its neighbours, toward its Test A range limit |
-| F7 | V1 | V2, V3, V4 → V1 | neighbour lost | At 5 min unplug V2's power bank; plug it back at 12 min |
-| F8 | V5 | V2, V3, V6 → V5 | busy | Phones at V2 and V6 send an SOS every 30 s for the whole session (varies the traffic feature) |
+| Baseline | `baseline-n1` ... `baseline-n6` | FIFO | None | Off |
+| Partial | `partial-n1` ... `partial-n6` | Min-Heap | None | Off |
+| Heuristic | `heuristic-n1` ... `heuristic-n6` | Min-Heap | Static rule | Off |
+| Ablation | `ablation-n1` ... `ablation-n6` | Min-Heap | Static rule | On |
+| Full | `full-n1` ... `full-n6` | Min-Heap | CART | On |
 
-The node also records any non-planned neighbour it happens to hear. Those links are usually weak, so they add useful failures.
+`node1` ... `node6` are development builds, not the formal Baseline. Full builds
+require the trained `include/cart_model.h`; do not insert a dummy model.
 
-**Rules**
+Example: flash one connected board at a time for Baseline collection:
 
-- One session = one laptop position + one condition. To change either, stop and start a new session with a new name.
-- Don't type `silent on` on the laptop node during a session; the node pauses labelling while it is deaf.
-- In normal sessions, don't move or unplug the other nodes.
-- Keep every `F*.csv` and `F*_raw.log`, even from short or failed sessions.
-- The final evaluation will add a second kind of row: data packets with ACK/NOACK. They are the **test** set, used to check that CART trained on heartbeats predicts real relaying. Test F needs none of them.
+```powershell
+pio run -e baseline-n1 -t upload
+pio run -e baseline-n2 -t upload
+pio run -e baseline-n3 -t upload
+pio run -e baseline-n4 -t upload
+pio run -e baseline-n5 -t upload
+pio run -e baseline-n6 -t upload
+```
 
-**Session log**
+With multiple boards connected, select the corresponding port explicitly:
 
-| Session | Laptop at / port | Condition | Start | End | Labels | Failures % | Notes |
-| --- | --- | --- | --- | --- | --- | --- | --- |
-| F1 | V1 / | normal |  |  |  |  |  |
-| F2 | V5 / | normal |  |  |  |  |  |
-| F3 | V3 / | normal |  |  |  |  |  |
-| F4 | V1 / | weak |  |  |  |  |  |
-| F5 | V5 / | weak |  |  |  |  |  |
-| F6 | V3 / | far |  |  |  |  |  |
-| F7 | V1 / | neighbour lost |  |  |  |  |  |
-| F8 | V5 / | busy |  |  |  |  |  |
+```powershell
+pio device list
+pio run -e partial-n3 -t upload --upload-port COM5
+```
 
-## Field log sheet
+Label V1-V6 and record firmware revision, environment, model/header version,
+library versions, radio settings and topology mask. V1 is the Main Hub; V2-V5
+are Mini Hubs; V6 is the Distant Edge Node. Verify each boot CONFIG record.
+The capture tool does not reset boards on connect: start capture, then press RST
+on every node to include CONFIG records. Never open two programs on one COM port.
 
-One row per stop, message or action.
+## 3. Power, sensing and equipment
 
-| Time | Test | Node | Place / stop | GPS or landmark | Distance to hub (m) | Line of sight? | Action (sent k, unplugged…) | Ref# | RSSI / SNR at hub | Arrived? (time, route) |
-| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
-|  | A | V3 | Stop 1 |  | 50 |  | SOS |  |  |  |
-|  | A | V3 | Stop 2 |  | 100 |  | SOS |  |  |  |
-|  | A | V3 | Stop 3 |  | 200 |  | SOS |  |  |  |
-|  | A | V3 | Stop 4 |  | 300 |  | SOS |  |  |  |
-|  | A | V3 | Stop 5 |  | 400 |  | SOS |  |  |  |
-|  | A | V3 | Stop 6 |  | 500 |  | SOS |  |  |  |
-|  | A | V3 | Stop 7 |  | 700 |  | SOS |  |  |  |
-|  | A | V3 | Stop 8 |  | 1000 |  | SOS |  |  |  |
-|  | C | V6 | C-V6-1 |  |  |  | SOS |  |  |  |
-|  | C | V6 | C-V6-2 |  |  |  | SOS |  |  |  |
-|  | C | V6 | C-V6-3 |  |  |  | SOS |  |  |  |
-|  | D | V3 | D1 relay unplugged |  |  |  | unplug |  |  |  |
-|  | D | V6 | D1-dead |  |  |  | SOS |  |  |  |
-|  | D | V6 | D2-held |  |  |  | SOS |  |  |  |
-|  | E | V6 | E1-k3 / k2 / k1 |  |  |  | 3 msgs |  |  |  |
+Bring six nodes with antennas fitted, charged battery/shield sets, enclosures,
+laptops/loggers, verified data cables, phones, a multimeter, site map and field sheets.
+Verify every battery/switch/cable connection and record the power source of each node.
 
-## Safety and troubleshooting
+After a valid cell-voltage sensing path exists, compare it against a multimeter,
+use `battery cal <measured volts>` per node, and check the `battery` report.
+Calibration cannot fix an absent sensing connection. Verify valid BATT records at
+startup and approximately every minute, plus neighbour battery telemetry in heartbeats.
+The current battery percentage is a voltage-based estimate (3.30 V -> 0%,
+4.20 V -> 100%), not directly measured remaining capacity.
 
-**Never power a node without its antenna, and never remove an antenna while a node is on.** Transmitting without an antenna can damage the radio. To take a node down, unplug its power bank.
+Battery-shield USB power differs from laptop USB power. Voltage-drop measurements
+require the measured battery to power the node without external power or charging.
+The analysis does not automatically exclude laptop-powered nodes. Establish a
+logging arrangement that does not unintentionally power the measured node; the
+current USB capture tool does not itself solve that hardware requirement.
+Do not replace missing battery data with 100% or silently drop the battery feature.
 
-| Problem | First thing to try |
+## 4. Roles and site record
+
+| Role | Responsibility |
 | --- | --- |
-| A node's Wi-Fi network is missing | Check the power bank is on (some switch off at low current; press its button); unplug and replug the node |
-| Hub hears no heartbeats from a node | Antenna screwed on firmly and vertical? Node raised? Move it 20–50 m closer and wait 1 minute |
-| Phone drops the node's Wi-Fi | Tap "Stay connected" / "Use without internet"; turn mobile data off while sending |
-| Portal page won't open | Type `http://192.168.4.1` in the browser yourself |
-| Monitor or capture says the port is busy | Only one program can use a COM port: close the other monitor or capture first |
-| Laptop monitor is blank | Press the node's RST button; if still blank, that board needs re-flashing with the current build |
-| Rain | Keep nodes in their enclosures; keep the laptop and its USB connection dry |
+| Hub operator | V1 logging and destination arrivals |
+| Sender/operator | Phone submissions or traffic injection and source records |
+| Node crew | Positioning, configuration checks and controlled disruptions |
+| Recorder | Run IDs, positions, power sources, faults and timing |
 
-**After the test:** save `fieldC.csv`, `fieldC_raw.log`, every `F*.csv` and `F*_raw.log`, every `platformio-device-monitor-….log`, the `routes` screenshots, this log sheet and the Test F session log in one folder, and send them over for analysis and CART training.
+The current topology mask permits V1-V2, V1-V3, V1-V4, V2-V4, V2-V5,
+V3-V5, V3-V6 and V5-V6. Keep it fixed across comparisons. Record node
+GPS/landmarks, antenna heights, obstructions and route matrices. Maintain separate
+team coordination when the test network is deliberately disrupted.
 
-## After the field test — what comes next
+## 5. Preliminary engineering checks A-E
 
-Five steps, in order. Each one needs the output of the one before it.
+These are separate from the 150 formal evaluation runs. Record actual outcomes;
+do not assume every message arrives or promise a fixed recovery time.
 
-| Step | What | Output | Who |
+### A. Range survey - Baseline
+
+Power only V1 and V3. At measured positions, wait at least two minutes and record
+RSSI, SNR, heartbeats, antenna height and obstructions. Submit labelled portal
+messages and match origin/ID to V1 arrivals. A local reference ID or hop ACK is
+not proof of hub delivery. Baseline has no DTN: a dropped out-of-range message
+is not expected to reappear automatically when the sender returns.
+
+### B. Planned-link check - Baseline
+
+Place all six nodes and allow about ten minutes for initial link-state propagation.
+Run `routes` and save the matrix. Reposition and recheck unusable planned links
+(weight 255). Freeze positions for subsequent comparisons; document any changes.
+
+### C. Portal and multi-hop delivery - Baseline
+
+Submit three labelled messages per origin V2-V6. Record source references,
+priorities, routes and confirmed hub arrivals. Capture source and destination logs.
+With hub-only capture, use a source submission sheet for manual PDR; the script
+cannot infer the denominator without source NEW records. Measure latency only
+with a documented common time reference and stated clock uncertainty.
+
+### D. Rerouting and buffering - Ablation
+
+Use `ablation-n1` ... `ablation-n6` to test DTN before training CART.
+Use `silent on` on a selected relay, then `silent off` after a fixed 60-second
+disruption. Record actual silence onset: an in-progress transmission finishes first.
+First test an available alternate path; separately isolate both planned neighbours
+of V6 to test no-route buffering. Record STORE, FORWARD, DROP/EVICT, ACK/NOACK,
+routes and hub arrivals. Restore all radios afterwards. A serial monitor and capture
+cannot share a port: settle command/control logging before formal trials.
+
+### E. Priority handling - Partial
+
+Queue k=3, k=2 and k=1 messages at the same node. Use local logs to check
+whether any less urgent data TX occurs strictly between each k=1 entry record
+and its first TX. Use accepted ENQUEUE records, never RX/NEW as inferred queue
+admission; require continuous node/boot log sequences. See `docs/PQA_LOGGING.md`.
+Do not calculate PQA from heap Index 0, queue_index or hub
+arrival order. A lower-priority transmission begun before entry is not a violation.
+
+## 6. Test F - Baseline data-packet collection
+
+Flash all six Baseline builds. Generate data packets; passive heartbeat-only
+recording is not the chosen training source. Heartbeats supply neighbour features;
+HB_OK/HB_MISS are diagnostic. Features are RSSI, SNR, estimated battery percentage
+and neighbour data-backoff count. Verify battery sensing before the final collection.
+
+Capture sender and intended-receiver records with CONFIG metadata and a usable
+common time reference. Do not compare local `ms` values between different nodes.
+Retain RX `to_me`/`overheard` details; another node overhearing a packet is not
+intended-receiver delivery. Save setup records but select a settled observation interval.
+
+Example (add all relevant node ports; do not inject at V1):
+
+```powershell
+python tools/capture_telemetry.py COM8 COM5 COM6 --inject COM5 --every 30 --session baseline-F01-normal --out baseline-F01-normal.csv
+```
+
+Start capture before resetting nodes to include their CONFIG records. Continuous
+injection starts automatically, so exclude startup traffic from the analysed interval.
+Use normal, obstructed/weak, distant, busy and controlled-failure sessions across
+multiple sending nodes and links. One physical collection session uses the same
+session ID across node files; a different port alone does not define a new session.
+
+Target at least 300 usable labelled observations and multiple independent sessions
+(the current report checks at least six and 20% Danger). These are planning targets,
+not guarantees of adequacy. Do not discard successes or fabricate failures to reach
+a target. Collect and retain the full condition-specific observations.
+
+Do not use `--target` as the eligible training-record count: it mixes heartbeat and
+ACK/NOACK events. Use documented session windows. Record at least 60 seconds
+beyond the last analysed data transmission and retain later arrivals for delayed
+classification. An incomplete observation window is not a confirmed loss.
+
+```powershell
+python tools/build_cart_dataset.py baseline-F*.csv --coverage coverage.json --out cart_dataset.csv
+```
+
+Configuration metadata now identifies Baseline data candidates. Missing/mixed CONFIG
+records are not accepted by default training. **Receiver reconciliation is now
+implemented in software, but paired hardware verification is pending.** Review
+the target and measured clock/observation bounds before creating `coverage.json`;
+see `docs/RECEIVER_LABELS.md`. Safe (0) means uniquely matched timely next-hop
+acceptance. Danger (1) requires completed transmission and verified non-reception
+under reviewed complete observation. Rejection, delay, logger failure, uncertain
+matching and missing evidence remain separate audit categories. Without coverage,
+data candidates remain unlabelled; the diagnostic heartbeat rows are not a substitute.
+New firmware logging must be flashed and tested on participating endpoints before
+this pilot. Its packet layout is unchanged. Old hub-only delivery logs remain useful
+for PDR checks with source submission evidence, but do not establish per-link labels.
+
+## 7. Train and freeze CART
+
+Only after the sensing and label requirements above are met:
+
+```powershell
+python tools/train_cart.py cart_dataset.csv --train-source data --split session --features rssi,snr,battery,traffic --out-dir cart_output --header include/cart_model.h
+```
+
+Training retains original feature units, Gini, maximum depth 5, minimum split size
+10 and balanced classes. Whole sessions form the outer approximately 80/20
+training/test split; an internal session split tunes the threshold. Invalid session
+splits stop training; do not bypass this by splitting adjacent rows.
+
+The Recall tie-break is corrected and software-tested: equal validation F1
+prefers higher Danger Recall. Verify the full training runtime and final dataset
+before fitting. Freeze the resulting header,
+threshold, data, reports, seed and firmware revision before independent evaluation.
+Alpha remains 2: the multiplier is `1 + 2 * Pf`, subject to integer rounding and
+the firmware's weight limit. No sensitivity analysis is claimed.
+
+Compile the same frozen model into all configurations for shadow logging. Only
+new independent Baseline shadow sessions enter formal classifier comparison; the
+five-configuration network trials remain separate. See docs/AVOIDED_LINK_EVALUATION.md.
+Only Full uses it for routing; the others log CART in shadow mode. Missing model
+inputs leave CART verdicts unavailable and cannot support a paired comparison.
+
+## 8. Formal comparison: 150 runs
+
+Five configurations x three tiers x ten repetitions = **150 runs**. Use the same
+positions, origin, seed/run pairing, observation window and disruption protocol
+for matched comparisons. Balance and record configuration order across trials.
+
+| Tier | One batch per origin | k1 / k2 / k3 | Disruption |
 | --- | --- | --- | --- |
-| 1 | Review the field data | Final node positions, range per direction, Test C–E results, enough CART labels? | Team sends files → analysis |
-| 2 | Train CART | Trained tree, its F1 score, `cart_model.h` for the firmware | Script written for the team; team reviews |
-| 3 | Build the comparison firmware | One build per configuration (baseline, heuristic, CART, FIFO, no DTN) | Firmware work |
-| 4 | Evaluation runs | PDR, latency, PQA and filter F1 for every configuration | Team in the field, then analysis |
-| 5 | Update the paper | Chapter 3 corrections, Chapter 4 results tables and figures | Team |
+| Low | 5 messages in the configured 5-second window | 2 / 2 / 1 | None |
+| Medium | 15 messages in the configured 2-second window | 5 / 6 / 4 | None |
+| High | 30-message burst, paced at >=50 ms per serial command | 15 / 9 / 6 | Origin radio silenced, restored approximately 60 s after the burst |
 
-### Step 1 — Review the field data (1–2 days after the test)
+### Every run
 
-- Send the folder from "After the test". From it come: RSSI/SNR vs distance for each direction (Test A), the measured link weights (Test B), delivery, route and latency per node (Test C), reroute time and hold time (Test D), and the arrival order (Test E).
-- **Decide:** keep the positions from Test B, or move a node whose link was marginal. If many links score 16+, the weight constants in `link_state.h` get retuned to your barangay's real numbers.
-- **CART label check:** run `python tools\build_cart_dataset.py F*.csv`. It needs at least 300 heartbeat labels, at least 20% HB_MISS and at least 6 sessions. If anything is short, run more Test F sessions before Step 2 (weak, far or neighbour-lost sessions give the misses).
+1. Verify configuration/model and node/port mapping. Close competing monitors.
+2. Start capture, then reset **all six** nodes to clear queue/DTN state and capture
+   CONFIG. For tier runs, do this promptly within the 120-second start delay.
+   If startup takes longer, abort/restart or set a longer delay consistently for
+   every configuration. Do not inject before routes have settled.
+3. Record source NEW, relevant TX/RX and classifier verdicts, ACK/NOACK, DTN
+   events and hub DELIVER. Include every relevant node port.
+4. Inject one batch at one selected origin. More injection ports multiply the
+   workload and require a revised protocol. Keep seed and run numbers matched.
+5. Record for a fixed observation window established by pilot runs. Examples use
+   600 seconds after the last scheduled command. Keep the same window across
+   configurations; do not stop early because some messages arrived.
+6. Restore silenced radios, save evidence and reset all six nodes before the next
+   run. Retain aborted trials and document any replacement runs.
 
-### Step 2 — Train CART (about 1 day)
+Example: Baseline trial 1, V6=COM5. COM8/COM6 are additional example capture
+ports, not an assertion that three ports cover the whole topology. Add the rest.
 
-- `tools/build_cart_dataset.py` (already written) turns the Test F `HB_OK` / `HB_MISS` rows into the training table. Features: RSSI, SNR, traffic, heartbeat age; label: arrived or missed. Missing heartbeat age is capped at 300 000 ms.
-- Split by session, 80% training / 20% testing, then train a CART tree (Gini, depth 3–5 so it fits on the ESP32).
-- Report accuracy, precision, recall, F1 and the confusion matrix, plus a picture of the tree and which features mattered most. These go in Chapter 4.
-- Export the tree as `include/cart_model.h`, so each leaf gives a failure probability Pf.
+```powershell
+python tools/capture_telemetry.py COM8 COM5 COM6 --inject COM5 --tier low --run 1 --seed 2026 --start-delay 120 --stop-after 600 --session baseline-low-run01 --out baseline_low_01.csv
+python tools/capture_telemetry.py COM8 COM5 COM6 --inject COM5 --tier medium --run 1 --seed 2026 --start-delay 120 --stop-after 600 --session baseline-medium-run01 --out baseline_medium_01.csv
+python tools/capture_telemetry.py COM8 COM5 COM6 --inject COM5 --tier high --run 1 --seed 2026 --hold 60 --start-delay 120 --stop-after 600 --session baseline-high-run01 --out baseline_high_01.csv
+```
 
-### Step 3 — Build the comparison firmware (2–3 days)
+These are three separate runs, each with the reset procedure. For the other four
+configurations, change both the flashed environments and session/output names.
+Repeat trial numbers 1-10 per tier. Do not add an unplanned relay disruption to
+these tier runs; define any additional disruption scenario separately and match it.
 
-- **Configuration switches** as PlatformIO environments, so one command builds each variant: queue = min-heap or FIFO; DTN = on or off; relay filter = none, heuristic, or CART.
-- **Heuristic filter:** skip a neighbour when RSSI ≤ −110 dBm or no heartbeat for over 75 s.
-- **CART filter:** the node runs the tree on each neighbour and adds a penalty to that link's weight, w′ = w + M · Pf, so Dijkstra steers around links likely to fail.
-- **Extra logging** the paper needs: how long each message was held in DTN (carry time) and the filter's decision per attempt, so its F1 can be measured live.
-- **Leftover fixes:** don't pre-fill the passcode on the portal (item 27), the 25-device Wi-Fi cap (29), long form bodies on `/api/submit` (30).
-- **Key:** the repo is public, so change the AES key in `aes_crypto.h` and `test_crypto.py` in this build. All six boards get re-flashed anyway.
-- Each change is tested on the bench with all six boards before it goes to the field.
+For High, inspect actual STORE/FORWARD and failed-attempt/DROP evidence.
+Configurations 1-3 have no DTN and use a three-failed-attempt policy. Ablation and
+Full buffer subject to capacity/eviction/expiry. Do not assume all injected messages
+were accepted or stored: retain NEW, rejection, EVICT and DROP evidence.
 
-### Step 4 — Evaluation runs (1–2 field days)
+More precisely, configurations 1-3 drop immediately if no usable route exists.
+The three-failed-hop budget applies while a usable route remains; channel-access
+deferrals are separate. Failed-hop counters are local to queued messages. See
+`docs/MESSAGE_HANDLING_POLICY.md`. Reports submitted directly on V1 are local
+deliveries and must not be mixed into the planned radio evaluation workload.
 
-- Same positions, same scenario for every configuration: the laptop injects traffic (`--inject`), and one relay is unplugged at a fixed time. That way the only difference between runs is the firmware.
-- **At least 3 runs per configuration**, about 20–30 minutes each, alternating configurations so weather and time of day hit them all equally.
-- **Clocks:** with several laptops, latency compares their PC clocks. Before going out, sync every laptop's clock (Windows Settings → Time → Sync now).
-- `analyze_run.py` gets extended to compare configurations side by side: PDR, mean and max latency, PQA, filter F1, and overhead (heartbeat and retry airtime).
-- **Energy:** the paper's energy metric needs a USB power meter. Without one, report the firmware's airtime-based estimate and say so in the limitations.
+### Manual portal-intake subset
 
-**CART on real relaying:** the data-packet rows from these runs (each transmission with its ACK or NOACK) are CART's **test set**. `build_cart_dataset.py` marks them `source = data`. The model trained on heartbeats in Step 2 predicts each one, and its accuracy and F1 on those rows go in Chapter 4.
+The methodology specifies 10% of the ten Baseline low-tier runs: **one manual
+run**. Disable automatic injection and submit five messages with the same 2/2/1
+priority counts. Record input timing/order and origin/IDs. Example capture:
 
-### Step 5 — Update the paper
+```powershell
+python tools/capture_telemetry.py COM8 COM5 COM6 --session baseline-low-manual-run01 --out baseline_low_manual_01.csv
+```
 
-- **Chapter 3 corrections** so the paper matches what was built: 915 MHz at 19 dBm; radio silence by command instead of removing antennas; heartbeat age instead of battery as a CART feature; CART trained on heartbeat reception and tested on data-packet ACKs; the link-weight formula; how link-state rows spread in heartbeats; frame sizes and airtimes; the PQA definition; 72-hour DTN retention; the 200-byte location + message limit.
-- **Chapter 4:** results tables and figures from Steps 1, 2 and 4.
-- **Limitations:** battery not measured (power banks), energy estimated, one barangay, six nodes.
+Identify it as manual; do not silently equate its workload timing with an automated
+run. Finalise its position within the 150-run schedule before evaluation and use
+matching input methods for workload-effect comparisons.
+
+## 9. Analysis and evidence
+
+```powershell
+python tools/analyze_run.py baseline_low_01.csv
+python tools/analyze_run.py evaluation/*.csv --compare
+```
+
+Use one complete run per comparison CSV. Review resets, clock accuracy and missing
+source/receiver records first. The software produces conditional Dunn-Bonferroni comparisons, but outputs
+do not by themselves certify metric validity or the independence of runs.
+See docs/STATISTICAL_ANALYSIS.md for saved files, eligibility and exclusions.
+
+- PDR uses unique hub arrivals and unique source messages; lost ACKs do not cancel
+  confirmed delivery. Preserve session, origin and message identifiers.
+- Report latency with corresponding PDR/priority and the time-reference uncertainty.
+- PQA uses local entry-to-first-TX order, not heap index or hub arrival order.
+- Compare CART/heuristic correctness only on planned independent Baseline shadow
+  sessions with reviewed receiver outcomes and the frozen model identity. Use
+  --classifier-plan and --coverage; no ACK-based fallback exists.
+- Use the first attempt per message/hop, audit exclusions, and review independent
+  sampling before interpreting McNemar. Do not label untried avoided links.
+- Voltage-drop analysis needs eligible calibrated cell readings over continuous
+  sessions (currently at least five minutes). Exclude externally powered intervals
+  before analysis; the rate does not establish energy consumption or full lifetime.
+
+Retain CSV and `_raw.log` files, models/reports, build identity, node/port and power
+maps, positions, routes, run order, manual submissions, anomalies and exclusions.
+
+| Session/run | Configuration/model | Tier/condition | Origin | Node/port map | Start/end | Power sources | Faults/exclusions | Files |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | | |
+
+| Time | Node | Position/height | Action | Origin/ID | Priority | Intended next hop | Actual reception/route | Notes |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| | | | | | | | | |
+
+## 10. Field precautions
+
+Keep antennas attached whenever powered. Use radio-silence commands for controlled
+link failures; power removal is a different scenario because it resets the node and
+erases volatile buffers. Restore all radios after checks. Keep boards/connectors dry.
+If a COM port is busy, close the other monitor/capture. If the portal does not open
+automatically, open `http://192.168.4.1` manually and record the issue.
+
+This plan update does not certify unresolved sensing, paired hardware or statistical
+features. Chapter V and hardware costs are outside its scope.

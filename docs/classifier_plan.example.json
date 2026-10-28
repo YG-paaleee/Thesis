@@ -1,0 +1,7 @@
+{
+  "purpose": "independent_baseline_shadow",
+  "training_report": "frozen/report.json",
+  "model_header": "frozen/cart_model.h",
+  "evaluation_sessions": ["SHADOW-EVAL-01", "SHADOW-EVAL-02"],
+  "freeze_evidence": "REPLACE with actual board/configuration/model verification evidence before use"
+}
