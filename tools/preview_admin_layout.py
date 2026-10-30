@@ -1,8 +1,11 @@
 """Local layout review with fictional records. Never connect this to field logs."""
 import json
+import time
 from http.server import ThreadingHTTPServer
 from urllib.parse import urlsplit, parse_qs
 from preview_web import Preview, ROOT
+
+PREVIEW_START = time.monotonic()
 
 SAMPLES = [
     dict(id=101, originNode=2, origin='V2', priority=1, packetType=0,
@@ -52,6 +55,7 @@ class LayoutPreview(Preview):
             self.send_header('X-History-Pages', '6')
             self.send_header('X-History-Snapshot', str(snapshot))
             self.send_header('X-Hub-Session', '777')
+            self.send_header('X-Hub-Uptime-Ms', str(200000 + int((time.monotonic() - PREVIEW_START) * 1000)))
             self.send_header('X-Recorded-Since-Boot', str(len(SAMPLES)))
             self.end_headers()
             self.wfile.write(body)

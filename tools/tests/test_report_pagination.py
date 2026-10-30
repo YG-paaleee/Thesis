@@ -29,7 +29,7 @@ bool canLock = true;
 int pdMS_TO_TICKS(int value) { return value; }
 int xSemaphoreTake(int, int) { return canLock; }
 void xSemaphoreGive(int) {}
-uint32_t millis() { return liveIncidentArrivalCounter * 1000; }
+int64_t esp_timer_get_time() { return 5000000000000LL + static_cast<int64_t>(liveIncidentArrivalCounter) * 1000000; }
 int32_t calculateIncidentLatencyMs(uint32_t, uint16_t) { return -1; }
 void buildIncidentPath(uint8_t, uint16_t, char* path, size_t capacity) { snprintf(path, capacity, "V2 -> V1"); }
 ''' + function(firmware, 'bool recordLiveIncident(')
@@ -68,6 +68,7 @@ int main() {
     // Exercise real firmware insertion and physical ring wrap, not a reimplementation.
     for (uint16_t i = 1; i <= 205; ++i) {
         assert(recordLiveIncident(i, 1, 0, 2, 0, 0, 0, "Here", std::to_string(i).c_str()));
+        assert(liveIncidents[(liveIncidentWriteIndex + 199) % 200].receivedAtMs > UINT32_MAX);
         if (i == 120) {
             assert(liveIncidentCount == 120);
             assert(planReportPage(120, 200, 20, 6, 120, out) == ReportPageResult::Ok);

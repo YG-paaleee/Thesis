@@ -8,6 +8,7 @@
 #include <Preferences.h>
 #include <SPI.h>
 #include <esp_system.h>
+#include <esp_timer.h>
 #include <esp_wifi.h>
 #include <time.h>
 #include <sys/time.h>
@@ -109,7 +110,7 @@ struct LiveIncident {
     uint8_t packetType;
     uint8_t originNode;
     int32_t latencyMs;
-    uint32_t receivedAtMs;
+    uint64_t receivedAtMs;
     uint32_t arrivalNo;      // 1, 2, 3 ... in the order this node received messages
     char path[64];
     char location[84];
@@ -526,7 +527,8 @@ bool recordLiveIncident(uint16_t messageId, uint8_t priority, uint8_t packetType
     incident.packetType = packetType;
     incident.originNode = originNode;
     incident.latencyMs = originNode == NODE_ID ? -1 : calculateIncidentLatencyMs(transmittedAtSeconds, transmittedAtMs);
-    incident.receivedAtMs = millis();
+    // Monotonic 64-bit uptime avoids millis() wrapping after roughly 49 days.
+    incident.receivedAtMs = static_cast<uint64_t>(esp_timer_get_time()) / 1000;
     incident.arrivalNo = ++liveIncidentArrivalCounter;
     buildIncidentPath(originNode, relayPath, incident.path, sizeof(incident.path));
     snprintf(incident.location, sizeof(incident.location), "%s", location ? location : "Unspecified");
@@ -2438,6 +2440,8 @@ void setupWebServerRoutes() {
         document["radioState"] = !radioReady ? "unavailable" : (radioSilent ? "paused" : "ready");
         document["maxClients"] = MAX_AP_CLIENTS;
         document["connectedClients"] = WiFi.softAPgetStationNum();
+        document["uptimeMs"] = static_cast<uint64_t>(esp_timer_get_time()) / 1000;
+        document["bootId"] = hubHistorySession;
         AsyncResponseStream *response = request->beginResponseStream("application/json");
         response->addHeader("Cache-Control", "no-store");
         serializeJson(document, *response);
@@ -2514,6 +2518,10 @@ void setupWebServerRoutes() {
         response->addHeader("X-History-Pages", String((unsigned int)selection.pages));
         response->addHeader("X-History-Snapshot", String((unsigned long)selection.snapshot));
         response->addHeader("X-Hub-Session", String((unsigned long)hubHistorySession));
+        char uptimeText[24];
+        snprintf(uptimeText, sizeof(uptimeText), "%llu",
+                 static_cast<unsigned long long>(esp_timer_get_time() / 1000));
+        response->addHeader("X-Hub-Uptime-Ms", uptimeText);
         response->addHeader("X-Recorded-Since-Boot", String((unsigned long)recordedSinceBoot));
         serializeJson(document, *response);
         request->send(response);

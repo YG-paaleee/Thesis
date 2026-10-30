@@ -274,6 +274,26 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
             margin-top: 14px;
             line-height: 1.3;
         }
+        .passcode-toast{position:fixed;left:50%;top:50%;transform:translate(-50%,-50%);z-index:1000;max-width:calc(100% - 24px);width:max-content;background:#111;color:#fff;border-radius:6px;padding:11px 16px;font-size:13px;pointer-events:none}
+        .reference-popup{width:min(320px,calc(100% - 32px));max-height:calc(100dvh - 32px);overflow:auto;border:1px solid #ddd;border-radius:10px;padding:16px;background:#fff;color:#172b4d;text-align:center;box-shadow:0 20px 70px #0003}
+        .reference-popup::backdrop{background:#0008}
+        .reference-popup h2{font-size:18px;margin-bottom:8px}
+        .reference-popup p{font-size:12px;line-height:1.4;margin:8px 0}
+        .reference-number{display:block;font-size:24px;font-weight:800;margin:8px 0;overflow-wrap:anywhere}
+        .reference-popup .btn{margin-top:7px;min-height:44px;padding:9px;font-size:12px}
+        .reference-popup #referenceCopyStatus:empty{display:none}
+        .reference-popup #referenceCountdown{font-size:11px;color:#596579}
+        .reference-popup .btn:disabled{background:#eee;color:#555;opacity:1}
+        #locationCounter{margin-top:6px}
+        [hidden]{display:none!important}
+        .demo-banner{font-size:12px;line-height:1.5;padding:10px 12px;margin-bottom:14px;background:#eee;border:1px solid #ccc;border-radius:5px;color:#333;text-align:center}
+        .passcode-field{position:relative}
+        .passcode-field #credential{padding-right:48px}
+        .passcode-eye{position:absolute;right:3px;top:50%;transform:translateY(-50%);width:40px;height:40px;display:grid;place-items:center;border:0;background:transparent;color:#42526e;cursor:pointer;border-radius:4px}
+        .passcode-eye svg{width:20px;height:20px;fill:none;stroke:currentColor;stroke-width:1.8;stroke-linecap:round;stroke-linejoin:round}
+        .passcode-eye:focus-visible{outline:2px solid currentColor;outline-offset:-3px}
+        .passcode-eye .eye-slash{display:none}
+        .passcode-eye[aria-pressed="true"] .eye-slash{display:block}
     </style>
 </head>
 <body>
@@ -293,7 +313,12 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
             <!-- Community Credential Verification (Anti-Spoofing / Chapter 4.3) -->
             <div class="auth-box">
                 <label for="credential" class="auth-label">&#128274; Barangay passcode</label>
-                <input type="password" id="credential" placeholder="Enter the barangay passcode" autocomplete="off" required>
+                <div class="passcode-field">
+                    <input type="password" id="credential" value="SANMIGUEL2026" autocomplete="off" required>
+                    <button type="button" id="showPasscode" class="passcode-eye" aria-label="Show passcode" title="Show passcode" aria-controls="credential" aria-pressed="false" onclick="togglePasscode()">
+                        <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M2 12s3.5-7 10-7 10 7 10 7-3.5 7-10 7S2 12 2 12Z"/><circle cx="12" cy="12" r="3"/><path class="eye-slash" d="m3 3 18 18"/></svg>
+                    </button>
+                </div>
                 <div class="auth-hint">Ask the barangay operator for the community passcode.</div>
             </div>
 
@@ -303,15 +328,12 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
                 <div class="auth-hint">Choose one. No category is selected for you.</div>
                 <label class="priority-card" id="card-1" for="priority-1">
                     <span class="priority-title"><input type="radio" name="priority" id="priority-1" value="1" required onchange="selectPriority(1)"> Medical SOS</span>
-                    <span class="priority-desc">Someone needs immediate medical help, such as severe bleeding or difficulty breathing.</span>
                 </label>
                 <label class="priority-card" id="card-2" for="priority-2">
                     <span class="priority-title"><input type="radio" name="priority" id="priority-2" value="2" required onchange="selectPriority(2)"> General emergency</span>
-                    <span class="priority-desc">Urgent help with a hazard or other emergency, such as flooding, fire, or a blocked evacuation route.</span>
                 </label>
                 <label class="priority-card" id="card-3" for="priority-3">
                     <span class="priority-title"><input type="radio" name="priority" id="priority-3" value="3" required onchange="selectPriority(3)"> Routine update</span>
-                    <span class="priority-desc">Information or a situation update that does not need immediate assistance.</span>
                 </label>
             </fieldset>
 
@@ -319,13 +341,13 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
             <div class="section-title">2. Tell us what's happening</div>
             <div class="form-group">
                 <label for="location">Location / Landmark in Brgy. San Miguel</label>
-                <input type="text" id="location" placeholder="Near basketball court, Purok 3, house #42" aria-describedby="lengthHelp byteCounter lengthStatus" oninput="updateByteCount()" autocomplete="off" required>
+                <input type="text" id="location" aria-describedby="locationCounter lengthStatus" oninput="updateByteCount()" autocomplete="off" required>
+                <div class="byte-counter" id="locationCounter">0 / 83 bytes</div>
             </div>
 
             <div class="form-group">
                 <label for="message">What happened and what help is needed?</label>
-                <textarea id="message" placeholder="State the emergency, number of people affected, and immediate assistance needed..." aria-describedby="lengthHelp byteCounter lengthStatus" oninput="updateByteCount()" autocomplete="off" required></textarea>
-                <div class="auth-hint" id="lengthHelp">Keep your report brief. Location allows up to 83 bytes; location and message together allow 200 bytes. Some letters and emoji use more than one byte. Text is never shortened automatically.</div>
+                <textarea id="message" aria-describedby="byteCounter lengthStatus" oninput="updateByteCount()" autocomplete="off" required></textarea>
                 <div class="byte-counter" id="byteCounter">0 / 200 bytes (location + message)</div>
                 <div id="lengthStatus" class="auth-hint" role="status" aria-live="polite"></div>
             </div>
@@ -346,6 +368,18 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
         </div>
     </div>
 
+    <div id="passcodeToast" class="passcode-toast" role="alert" aria-atomic="true" hidden></div>
+    <dialog id="referencePopup" class="reference-popup" aria-labelledby="referenceTitle" aria-describedby="referenceStatus referenceReminder">
+        <h2 id="referenceTitle"></h2>
+        <p id="referenceStatus"></p>
+        <div>Reference number</div>
+        <strong id="referenceNumber" class="reference-number"></strong>
+        <button type="button" id="copyReference" class="btn btn-secondary">Copy reference number</button>
+        <p id="referenceCopyStatus" role="status"></p>
+        <p id="referenceReminder"><strong>Save your reference number or take a screenshot.</strong></p>
+        <p id="referenceCountdown"></p>
+        <button type="button" id="referenceDone" class="btn btn-primary" disabled>I saved my reference</button>
+    </dialog>
     <script>
         var selectedPriority = 0;
         var lastSubmissionLocal = false;
@@ -356,6 +390,78 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
         var MAX_LOCATION_BYTES = 83;
         var encoder = (typeof TextEncoder !== 'undefined') ? new TextEncoder() : null;
         var nodeInfoRequestActive = false;
+        var passcodeToastTimer = null;
+        var referencePopupTimer = null;
+        var referenceUnlockAt = 0;
+        var referencePopup = document.getElementById('referencePopup');
+
+        function togglePasscode() {
+            var field = document.getElementById('credential');
+            var button = document.getElementById('showPasscode');
+            var visible = field.type === 'password';
+            field.type = visible ? 'text' : 'password';
+            button.setAttribute('aria-pressed', String(visible));
+            button.setAttribute('aria-label', visible ? 'Hide passcode' : 'Show passcode');
+            button.title = visible ? 'Hide passcode' : 'Show passcode';
+        }
+
+        function showPasscodeError() {
+            clearTimeout(passcodeToastTimer);
+            document.getElementById('statusBox').style.display = 'none';
+            document.getElementById('disconnectBtn').style.display = 'none';
+            var toast = document.getElementById('passcodeToast');
+            toast.textContent = 'Incorrect passcode. Try again.';
+            toast.hidden = false;
+            var credential = document.getElementById('credential');
+            credential.focus();
+            credential.select();
+            passcodeToastTimer = setTimeout(function() {
+                toast.hidden = true;
+                toast.textContent = '';
+            }, 3000);
+        }
+
+        function showReferencePopup(confirmation) {
+            var local = confirmation.status === 'delivered_local';
+            document.getElementById('statusBox').style.display = 'none';
+            document.getElementById('disconnectBtn').style.display = 'none';
+            document.getElementById('referenceTitle').textContent = local ? 'Report recorded' : 'Report queued';
+            document.getElementById('referenceStatus').textContent = local ? 'Recorded at this main hub.' : 'Waiting to send to the main hub. Delivery not confirmed.';
+            document.getElementById('referenceNumber').textContent = confirmation.ref;
+            document.getElementById('referenceCopyStatus').textContent = '';
+            clearInterval(referencePopupTimer);
+            referenceUnlockAt = performance.now() + 10000;
+            function updateCountdown() {
+                var seconds = Math.max(0, Math.ceil((referenceUnlockAt - performance.now()) / 1000));
+                document.getElementById('referenceDone').disabled = seconds > 0;
+                document.getElementById('referenceCountdown').textContent = seconds ? 'Close available in ' + seconds + 's' : 'Ready to close';
+                if (!seconds) { clearInterval(referencePopupTimer); referencePopupTimer = null; }
+            }
+            if (!referencePopup.open) referencePopup.showModal();
+            updateCountdown();
+            referencePopupTimer = setInterval(updateCountdown, 250);
+            document.getElementById('copyReference').focus();
+        }
+
+        referencePopup.addEventListener('cancel', function(event) {
+            if (performance.now() < referenceUnlockAt) event.preventDefault();
+        });
+        referencePopup.addEventListener('close', function() {
+            clearInterval(referencePopupTimer);
+            document.getElementById('sendBtn').focus();
+        });
+        document.getElementById('referenceDone').onclick = function() {
+            if (performance.now() >= referenceUnlockAt) referencePopup.close();
+        };
+        document.getElementById('copyReference').onclick = async function() {
+            var ref = document.getElementById('referenceNumber').textContent;
+            try {
+                await navigator.clipboard.writeText(ref);
+                document.getElementById('referenceCopyStatus').textContent = 'Reference number copied.';
+            } catch (error) {
+                document.getElementById('referenceCopyStatus').textContent = 'Could not copy. Write down ' + ref + ' or take a screenshot.';
+            }
+        };
 
         function applyNodeInfo(info) {
             var roles = { main_hub: 'Main hub', mini_hub: 'Mini hub', edge: 'Edge node' };
@@ -441,7 +547,8 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
         function updateByteCount() {
             var state = reportLengthState();
             var counterEl = document.getElementById('byteCounter');
-            counterEl.innerText = state.totalBytes + ' / ' + MAX_BYTES + ' bytes total; location ' + state.locationBytes + ' / ' + MAX_LOCATION_BYTES + ' bytes';
+            counterEl.innerText = state.totalBytes + ' / ' + MAX_BYTES + ' bytes (location + message)';
+            document.getElementById('locationCounter').textContent = state.locationBytes + ' / ' + MAX_LOCATION_BYTES + ' bytes';
             document.getElementById('lengthStatus').textContent = state.error;
             if (state.error) {
                 counterEl.className = 'byte-counter byte-warning';
@@ -466,10 +573,14 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
         }
 
         function clearForm() {
-            if (submissionActive) return;
+            if (submissionActive || referencePopup.open) return;
             if ((submissionUncertain || lastConfirmedSubmission) && !confirm('Save any reference before clearing. Clearing does not cancel a report already accepted by the node. Clear this form?')) return;
             document.getElementById('emergencyForm').reset();
-            document.getElementById('credential').value = '';
+            document.getElementById('credential').value = 'SANMIGUEL2026';
+            document.getElementById('credential').type = 'password';
+            document.getElementById('showPasscode').setAttribute('aria-pressed', 'false');
+            document.getElementById('showPasscode').setAttribute('aria-label', 'Show passcode');
+            document.getElementById('showPasscode').title = 'Show passcode';
             selectPriority(0);
             lastSubmissionLocal = false;
             submissionUncertain = false;
@@ -477,6 +588,8 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
             updateByteCount();
             document.getElementById('statusBox').style.display = 'none';
             document.getElementById('disconnectBtn').style.display = 'none';
+            clearTimeout(passcodeToastTimer);
+            document.getElementById('passcodeToast').hidden = true;
         }
 
         function handleDisconnect() {
@@ -517,7 +630,7 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
 
             var fingerprint = JSON.stringify([selectedPriority, loc, msg]);
             if (lastConfirmedSubmission && lastConfirmedSubmission.fingerprint === fingerprint) {
-                showStatus(lastConfirmedSubmission.html + '<div>This report was already accepted. Use Clear form for a new report.</div>', true);
+                showReferencePopup(lastConfirmedSubmission.confirmation);
                 return;
             }
             if (submissionUncertain && !confirm('The previous request may already have been accepted, even though its reply was lost. Sending again may create another report. Check with the operator if possible. Send anyway?')) return;
@@ -552,11 +665,15 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
                         try { data = JSON.parse(body); } catch (parseError) {}
                     }
                     if (!res.ok) {
-                        if (res.status === 404 || res.status === 405) {
-                            throw new Error('No message submission backend is available here (HTTP ' + res.status + '). Live Server is only serving the mock page; no message was sent.');
+                        if (res.status === 404 || res.status === 405 || res.status === 501) {
+                            var unavailable = new Error('This preview is not connected to a hub. No report was sent.');
+                            unavailable.explicitRejection = true;
+                            unavailable.backendUnavailable = true;
+                            throw unavailable;
                         }
                         var rejection = new Error((data && data.message) || ('HTTP ' + res.status));
                         rejection.explicitRejection = data && data.status === 'error';
+                        rejection.incorrectPasscode = res.status === 403 && rejection.explicitRejection && /passcode|credential/i.test(rejection.message);
                         throw rejection;
                     }
                     if (!data || typeof data !== 'object') {
@@ -581,13 +698,21 @@ const char CAPTIVE_PORTAL_HTML[] PROGMEM = R"CAPTIVEPORTAL(
                                   '<div style="margin-top:3px;">Ref# <b>' + ref + '</b> &bull; Priority: <b>' + priorityLabel + '</b></div>' +
                                   '<div class="disconnect-notice">' + (locallyDelivered ? 'Your report is recorded on this main hub. No radio transmission was needed.' : 'Your message is waiting to be sent to the main hub. Arrival there is not yet confirmed.') + ' Please save your reference number.</div>';
 
-                showStatus(successHtml, true);
-                lastConfirmedSubmission = { fingerprint: fingerprint, html: successHtml };
+                showReferencePopup(data);
+                lastConfirmedSubmission = { fingerprint: fingerprint, html: successHtml, confirmation: { status: data.status, ref: data.ref } };
                 submissionUncertain = false;
             })
             .catch(function(err) {
                 console.warn("Submission could not be confirmed.");
                 submissionUncertain = submissionUncertain || !err.explicitRejection;
+                if (err.incorrectPasscode) {
+                    showPasscodeError();
+                    return;
+                }
+                if (err.backendUnavailable) {
+                    showStatus('<div><b>No hub connected</b></div><div>This preview cannot send reports. Connect to the hub\'s Wi-Fi and open its portal to send your report.</div><div>Your text has been kept.</div>', false);
+                    return;
+                }
                 var message = err && err.name === 'AbortError' ? 'The node did not reply within 10 seconds.' : (err instanceof TypeError)
                     ? 'The connection was interrupted or the node could not be reached.'
                     : ((err && err.message) ? err.message : 'The hub could not be reached.');

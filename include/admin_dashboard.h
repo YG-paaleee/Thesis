@@ -371,20 +371,20 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
 
     <header>
         <div class="header-title">
-            <h1>&#128225; Main Hub Emergency Command (V1)</h1>
-            <div class="subtitle">Barangay San Miguel &bull; Reports received at the main hub</div>
+            <h1>Main Hub Dashboard</h1>
+            <div class="subtitle">Barangay San Miguel</div>
         </div>
         <div class="header-badges">
-            <span class="badge badge-hub">Node V1 (Stationary Hub)</span>
+            <span class="badge badge-hub">Main hub V1</span>
         </div>
     </header>
 
     <section id="sosAlert" class="priority-alert" aria-live="polite" aria-atomic="true">
         <div class="priority-alert-icon" aria-hidden="true">!</div>
         <div>
-            <div class="priority-alert-label">Medical reports on this page</div>
+            <div class="priority-alert-label">Medical reports</div>
             <h2 id="sosTitle">Checking recent reports...</h2>
-            <p id="sosSummary">Counts are unavailable until the hub responds.</p>
+            <p id="sosSummary">Waiting for hub data.</p>
             <ul id="sosList" class="priority-alert-list"></ul>
         </div>
     </section>
@@ -396,15 +396,15 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
             <div class="metric-val" id="metricTotal">--</div>
         </div>
         <div class="metric-card metric-card-sos">
-            <div class="metric-label">Medical reports shown</div>
+            <div class="metric-label">Medical (this page)</div>
             <div class="metric-val sos" id="metricSOS">--</div>
         </div>
         <div class="metric-card">
-            <div class="metric-label">General emergencies shown</div>
+            <div class="metric-label">General (this page)</div>
             <div class="metric-val gen" id="metricGen">--</div>
         </div>
         <div class="metric-card">
-            <div class="metric-label">Routine reports shown</div>
+            <div class="metric-label">Routine (this page)</div>
             <div class="metric-val rout" id="metricRout">--</div>
         </div>
     </div>
@@ -413,14 +413,14 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
         <div class="table-panel">
             <div class="table-controls">
                 <div class="panel-header" style="margin:0;">
-                    <span>Received report history</span>
+                    <span>Received reports</span>
                 </div>
                 <div class="report-tools">
                     <label for="sortOrder">Sort reports
                     <select id="sortOrder" class="filter-select" onchange="renderTable()">
-                        <option value="arrival">Arrival order (first &rarr; last)</option>
+                        <option value="arrival">Oldest first</option>
                         <option value="newest">Newest first</option>
-                        <option value="priority">Medical reports first</option>
+                        <option value="priority">Medical first</option>
                     </select>
                     </label>
                     <label for="priorityFilter">Show category
@@ -441,11 +441,15 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
                 <button type="button" class="btn" id="newerPageBtn" onclick="changeHistoryPage(-1)" disabled>Newer page</button>
                 <span id="pageStatus" role="status">Page unavailable</span>
                 <button type="button" class="btn" id="olderPageBtn" onclick="changeHistoryPage(1)" disabled>Older page</button>
-                <button type="button" class="btn" id="latestPageBtn" onclick="showLatestReports()">Return to latest / refresh</button>
+                <button type="button" class="btn" id="latestPageBtn" onclick="showLatestReports()">Latest / refresh</button>
             </nav>
             <p id="exportStatus" role="status" class="technical-note"></p>
-            <p id="historyNotice" style="margin:12px 0; color:#aeb9c7; line-height:1.5;">This is a limited recent-report view. Complete experimental records must be saved separately through USB logging.</p>
-            <p class="technical-note" id="timingNotice">Receipt times below show hub uptime, not delivery delay. Delivery timing requires verified paired logs.</p>
+            <p id="historyNotice" style="margin:12px 0; color:#aeb9c7; line-height:1.5;">Loading history...</p>
+            <details class="report-details" style="margin:10px 0;">
+                <summary>History &amp; timing notes</summary>
+                <p class="technical-note">History clears on restart. Counts, filters and sorting apply to this page only. Keep complete research records through USB logging.</p>
+                <p class="technical-note" id="timingNotice">Clock times are device-clock estimates in Philippine time (PHT). Without a clock reference, hub uptime is shown. Delivery timing requires verified paired logs.</p>
+            </details>
             <table aria-label="Recent reports received at the main hub">
                 <thead>
                     <tr>
@@ -472,6 +476,36 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
         let historyPage = 1, historyPages = 1, historySnapshot = null, historySession = null;
         let historyFrozen = false, historyCapacity = null, historyRetained = null;
         let historyExportActive = false;
+        let receiptClock = null;
+
+        function monotonicNow() {
+            return typeof performance !== 'undefined' ? performance.now() : Date.now();
+        }
+
+        function makeReceiptClock(uptimeMs, session, wallStart, wallEnd, monoStart, monoEnd) {
+            const rttMs = monoEnd - monoStart;
+            if (!Number.isSafeInteger(uptimeMs) || uptimeMs < 0 ||
+                !Number.isSafeInteger(session) || session < 0 || session > 4294967295 ||
+                !Number.isFinite(wallStart) || !Number.isFinite(wallEnd) ||
+                !Number.isFinite(rttMs) || rttMs < 0 || rttMs > 2000 ||
+                Math.abs((wallEnd - wallStart) - rttMs) > 1000) return null;
+            // The server sampled uptime somewhere inside this request's round trip.
+            return { session, uptimeMs, epochMs: (wallStart + wallEnd) / 2, uncertaintyMs: rttMs / 2 };
+        }
+
+        function estimatedReceiptMs(report, clock = receiptClock) {
+            if (!clock || !Number.isSafeInteger(report.rxTime) || report.rxTime < 0 || report.rxTime > clock.uptimeMs) return null;
+            const epoch = clock.epochMs - (clock.uptimeMs - report.rxTime);
+            return Number.isFinite(epoch) && Math.abs(epoch) <= 8640000000000000 ? epoch : null;
+        }
+
+        function receiptTimeText(report, full = false) {
+            const epoch = estimatedReceiptMs(report);
+            if (epoch == null) return null;
+            const options = { timeZone: 'Asia/Manila', hour: 'numeric', minute: '2-digit', hour12: true };
+            if (full) Object.assign(options, { year: 'numeric', month: 'short', day: 'numeric', second: '2-digit' });
+            return new Date(epoch).toLocaleString('en-PH', options);
+        }
 
         function updateMetrics() {
             const emergencies = incidentLogs.filter(m => m.packetType !== 1 && m.packetType !== 3);
@@ -498,11 +532,11 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
             alert.classList.toggle('has-sos', reports.length > 0);
             alert.classList.toggle('is-clear', reports.length === 0);
             document.getElementById('sosTitle').textContent = reports.length
-                ? `${reports.length} medical report${reports.length === 1 ? '' : 's'} on this page`
-                : 'No medical reports on this page';
+                ? `${reports.length} on this page`
+                : 'None on this page';
             document.getElementById('sosSummary').textContent = reports.length
-                ? `Latest ${Math.min(reports.length, 3)} shown below. This counts received records, not unread or unresolved emergencies.`
-                : 'This describes this page only, not all reports or unresolved emergencies.';
+                ? `Latest ${Math.min(reports.length, 3)} below. Not an unresolved-case count.`
+                : 'No received medical reports on this page. Not a case-status tracker.';
             reports.slice(0, 3).forEach(report => {
                 const item = document.createElement('li');
                 item.textContent = `${report.origin || `V${report.originNode}`}#${String(report.id).padStart(4, '0')} · ${report.location} — ${report.message}`;
@@ -577,12 +611,17 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
                 message.textContent = m.message || '';
                 reportCell.append(location, message);
                 addCell('Reference', 'report-ref', `${m.origin || `V${m.originNode}`}#${String(m.id).padStart(4, '0')}`);
-                const receipt = addCell('Received at hub', '', Number.isFinite(receivedSeconds)
+                const clockTime = receiptTimeText(m);
+                const receipt = addCell('Received at hub', '', clockTime ? `~ ${clockTime} PHT` : Number.isFinite(receivedSeconds)
                     ? `${receivedSeconds.toFixed(1)} s after hub restart` : 'Time unavailable');
                 const arrival = document.createElement('div');
                 arrival.className = 'receipt-note';
                 arrival.textContent = m.arrival != null ? `Arrival #${m.arrival}` : 'Arrival number unavailable';
                 receipt.appendChild(arrival);
+                const duration = document.createElement('div');
+                duration.className = 'receipt-note';
+                duration.textContent = 'Delivery duration: unavailable';
+                receipt.appendChild(duration);
                 const technicalCell = addCell('Technical details');
                 const details = document.createElement('details');
                 details.className = 'report-details';
@@ -595,6 +634,9 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
                 summary.textContent = 'View details';
                 const list = document.createElement('dl');
                 const technical = [
+                    ['Estimated received time (PHT)', receiptTimeText(m, true) || 'Unavailable — no clock reference'],
+                    ['Time source', clockTime ? `Device-clock estimate; network uncertainty ±${Math.ceil(receiptClock.uncertaintyMs)} ms. Device clock and hub drift are not verified.` : 'Hub uptime only'],
+                    ['Delivery duration', 'Unavailable — requires synchronized send/receive logs'],
                     ['Origin node', m.origin || `V${m.originNode}`],
                     ['Radio path', m.route || 'Unavailable'],
                     ['Packet type', typeNames[m.packetType] || 'UNKNOWN'],
@@ -647,7 +689,9 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
             const timer = setTimeout(() => controller.abort(), 8000);
             try {
                 const query = `?page=${page}` + (snapshot == null ? '' : `&snapshot=${snapshot}&session=${session}`);
+                const wallStart = Date.now(), monoStart = monotonicNow();
                 const response = await fetch('/api/live_incidents' + query, { cache: 'no-store', signal: controller.signal });
+                const wallEnd = Date.now(), monoEnd = monotonicNow();
                 if (!response.ok) throw new Error(response.status === 409 ? 'History expired or hub restarted. Return to latest reports.' : `HTTP ${response.status}`);
                 const records = await response.json();
                 if (!Array.isArray(records) || records.some(m => !m ||
@@ -678,7 +722,8 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
                     (snapshot != null && (meta.snapshot !== snapshot || meta.session !== session)))) {
                     throw new Error('Invalid history pagination metadata');
                 }
-                return { records, meta };
+                const clock = makeReceiptClock(headerNumber('X-Hub-Uptime-Ms'), meta.session, wallStart, wallEnd, monoStart, monoEnd);
+                return { records, meta, clock };
             } finally {
                 clearTimeout(timer);
             }
@@ -713,7 +758,7 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
                 if (!records.length) { status.textContent = 'No retained reports to export.'; return; }
                 records.sort((a, b) => a.arrival - b.arrival);
                 exportToCSV(records, 'retained_history_snapshot', first.meta);
-                status.textContent = `Exported ${records.length} retained reports. RAM history is limited and clears on restart; keep complete USB logs.`;
+                status.textContent = `Exported ${records.length} reports. History clears on restart; keep USB logs.`;
             } catch (error) {
                 status.textContent = `Export failed: ${error.message} No partial CSV was downloaded.`;
             } finally {
@@ -728,8 +773,12 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
             for (const id of ['newerPageBtn', 'olderPageBtn', 'latestPageBtn']) document.getElementById(id).disabled = true;
             const status = document.getElementById('liveStatus');
             try {
-                const { records, meta } = await readHistoryPage(page, snapshot, session);
-                const recordsChanged = !hasLiveData || JSON.stringify(records) !== JSON.stringify(incidentLogs);
+                const { records, meta, clock } = await readHistoryPage(page, snapshot, session);
+                // A stable anchor keeps unchanged rows from jumping on every poll.
+                const clockChanged = (!receiptClock !== !clock) || (clock && receiptClock && clock.session !== receiptClock.session);
+                if (clockChanged || !receiptClock) receiptClock = clock;
+                if (receiptClock && records.some(m => m.rxTime > receiptClock.uptimeMs)) receiptClock = clock;
+                const recordsChanged = clockChanged || !hasLiveData || JSON.stringify(records) !== JSON.stringify(incidentLogs);
                 incidentLogs = records;
                 hasLiveData = true;
                 lastLiveUpdateMs = Date.now();
@@ -742,13 +791,13 @@ const char ADMIN_DASHBOARD_HTML[] PROGMEM = R"ADMINDASHBOARD(
                 document.getElementById('newerPageBtn').disabled = page <= 1;
                 document.getElementById('olderPageBtn').disabled = page >= historyPages;
                 document.getElementById('pageStatus').textContent = `Page ${page} of ${historyPages}`;
-                status.textContent = `Connected · ${historyFrozen ? 'saved history snapshot; return to latest to resume live updates' : 'live latest page'} · last updated ${new Date(lastLiveUpdateMs).toLocaleTimeString()}`;
+                status.textContent = `${historyFrozen ? 'Saved view · Latest / refresh to resume' : 'Connected · Live view'} · ${new Date(lastLiveUpdateMs).toLocaleTimeString()}`;
                 status.style.color = '#3fb950';
-                document.getElementById('historyNotice').textContent = `Showing ${records.length} reports on this page` +
-                    (recordedSinceBoot == null ? '.' : ` out of ${recordedSinceBoot} hub-recorded reports since restart.`) +
-                    (historyCapacity == null ? ' Pagination unavailable with this firmware.' : ` Snapshot contains ${historyRetained} retained reports; RAM holds the latest ${historyCapacity}, ${recentLimit} per page.`) +
-                    (historyCapacity != null && recordedSinceBoot > historyCapacity ? ` ${recordedSinceBoot - historyCapacity} older reports have already been replaced in RAM.` : '') +
-                    ' History clears when the hub restarts. Counts, category filtering and sorting describe this page only. Export this page or all retained history; save complete experimental records separately through USB logging. Uptime and arrival gaps are not delivery delay.';
+                document.getElementById('historyNotice').textContent = `${records.length} on this page` +
+                    (recordedSinceBoot == null ? '' : ` · ${recordedSinceBoot} received since restart`) +
+                    (historyCapacity == null ? ' · Pagination unavailable.' : ` · ${historyRetained}/${historyCapacity} stored in this view · ${recentLimit}/page.`) +
+                    (historyCapacity != null && recordedSinceBoot > historyCapacity ? ` ${recordedSinceBoot - historyCapacity} older reports replaced.` : '') +
+                    ' History clears on restart.';
                 if (recordsChanged) {
                     updateMetrics();
                     renderTable();
